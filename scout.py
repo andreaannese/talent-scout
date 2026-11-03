@@ -15,7 +15,7 @@ import urllib.parse, urllib.request
 import xml.etree.ElementTree as ET
 from html import unescape
 
-UA = "TalentScoutMVP/0.1 (research tool)"
+UA = "TalentScout/0.3 (+https://github.com/andreaannese/talent-scout) python-urllib"
 DB = os.environ.get("SCOUT_DB", "scout.db")
 THIS_YEAR = dt.date.today().year
 
@@ -91,6 +91,33 @@ def src_wikidata(min_age, max_age, limit):
         print(f"  wikidata {label}: {n}")
         time.sleep(WIKIDATA_PAUSE)
 
+# ---------------------------------------------------------------- Source 1b: Wikipedia search
+# Uses the normal MediaWiki API (separate, more generous limits than the Wikidata query service).
+WIKI_TOPICS = ["hacker", "programmer", "prodigy", "inventor", "founder", "entrepreneur", "olympiad",
+               "mathematician", "scientist", "artist", "painter", "musician", "composer", "chess", "youngest"]
+
+def src_wikipedia(min_age, max_age, per_query):
+    api = "https://en.wikipedia.org/w/api.php"
+    done = set()
+    for year in range(THIS_YEAR - max_age, THIS_YEAR - min_age + 1):
+        for topic in WIKI_TOPICS:
+            params = {"action": "query", "format": "json", "list": "search", "srlimit": per_query,
+                      "srprop": "snippet", "srsearch": f'incategory:"{year} births" {topic}'}
+            try:
+                data = json.loads(get(api + "?" + urllib.parse.urlencode(params), timeout=30))
+            except Exception as e:
+                print(f"  wikipedia {year} {topic} failed: {e}", file=sys.stderr); time.sleep(5); continue
+            for r in data.get("query", {}).get("search", []):
+                if r["pageid"] in done: continue
+                done.add(r["pageid"])
+                snippet = re.sub("<[^>]+>", "", unescape(r.get("snippet", "")))
+                yield {"key": f"wp:{r['pageid']}", "name": r["title"], "birth_year": year,
+                       "text": f"{r['title']} (born {year}, matched '{topic}'): {snippet}",
+                       "website": None, "country": None, "source": "wikipedia",
+                       "source_url": "https://en.wikipedia.org/wiki/" + urllib.parse.quote(r["title"].replace(" ", "_"))}
+            time.sleep(0.5)
+    print(f"  wikipedia: {len(done)} people")
+
 # ---------------------------------------------------------------- Source 2: News RSS
 NEWS_QUERIES = [
     '"year-old hacker"', '"teen hacker"', '"year-old inventor"', '"teen founder"',
@@ -98,21 +125,38 @@ NEWS_QUERIES = [
     '"year-old" scientist award', '"teen" "olympiad" gold', '"year-old" bug bounty',
 ]
 
+def _rss_items(xml_text, per_query, source):
+    root = ET.fromstring(xml_text)
+    for it in list(root.iter("item"))[:per_query]:
+        title = unescape(it.findtext("title") or "")
+        desc = re.sub("<[^>]+>", " ", unescape(it.findtext("description") or ""))
+        link = it.findtext("link") or title
+        yield {"key": "news:" + link[:300], "name": None, "birth_year": None, "text": f"{title}. {desc}",
+               "website": None, "country": None, "source": source, "source_url": link}
+
+def news_gdelt(q, n):
+    url = "https://api.gdeltproject.org/api/v2/doc/doc?" + urllib.parse.urlencode(
+        {"query": q + " sourcelang:english", "mode": "artlist", "format": "json", "maxrecords": n, "timespan": "12m"})
+    for a in json.loads(get(url, timeout=40) or "{}").get("articles", []):
+        yield {"key": "news:" + a["url"][:300], "name": None, "birth_year": None, "text": a.get("title", ""),
+               "website": None, "country": a.get("sourcecountry"), "source": "gdelt", "source_url": a["url"]}
+
+def news_bing(q, n):
+    return _rss_items(get("https://www.bing.com/news/search?format=rss&q=" + urllib.parse.quote(q)), n, "bing_news")
+
+def news_google(q, n):
+    return _rss_items(get("https://news.google.com/rss/search?hl=en&gl=US&ceid=US:en&q=" + urllib.parse.quote(q)), n, "google_news")
+
 def src_news(queries, per_query):
     for q in queries:
-        url = "https://news.google.com/rss/search?hl=en&gl=US&ceid=US:en&q=" + urllib.parse.quote(q)
-        try:
-            root = ET.fromstring(get(url))
-        except Exception as e:
-            print(f"  news '{q}' failed: {e}", file=sys.stderr); continue
-        for it in root.iter("item"):
-            if per_query <= 0: break
-            title = unescape(it.findtext("title") or "")
-            desc = re.sub("<[^>]+>", " ", unescape(it.findtext("description") or ""))
-            yield {"key": "news:" + (it.findtext("link") or title)[:300], "name": None, "birth_year": None,
-                   "text": f"{title}. {desc}", "website": None, "country": None,
-                   "source": "google_news", "source_url": it.findtext("link")}
-        time.sleep(1)
+        for name, fn in (("gdelt", news_gdelt), ("bing", news_bing), ("google", news_google)):
+            try:
+                got = list(fn(q, per_query))
+            except Exception as e:
+                print(f"  news {name} '{q}' failed: {e}", file=sys.stderr); time.sleep(3); continue
+            if got:
+                print(f"  news {name} '{q}': {len(got)}"); yield from got; break
+        time.sleep(6)  # GDELT asks for max ~1 request / 5 s
 
 # ---------------------------------------------------------------- Scoring (free LLM)
 LLM_PROMPT = """You screen candidates for a talent scouting list of people who did extraordinary
@@ -306,6 +350,9 @@ def run(args):
         print("Querying Wikidata...")
         try: items += list(src_wikidata(args.min_age, args.max_age, args.limit))
         except Exception as e: print(f"  wikidata failed: {e}", file=sys.stderr)
+    if "wikipedia" in args.sources:
+        print("Searching Wikipedia...")
+        items += list(src_wikipedia(args.min_age, args.max_age, args.wiki_per_query))
     if "news" in args.sources:
         print("Reading news RSS...")
         items += list(src_news(NEWS_QUERIES, args.per_query))
@@ -352,7 +399,8 @@ def export(con, path="people.csv"):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--sources", nargs="+", default=["wikidata", "news"])
+    ap.add_argument("--sources", nargs="+", default=["news", "wikipedia", "wikidata"])
+    ap.add_argument("--wiki-per-query", type=int, default=5)
     ap.add_argument("--min-age", type=int, default=14)
     ap.add_argument("--max-age", type=int, default=35, help="35 keeps 'older but did it young' people")
     ap.add_argument("--limit", type=int, default=300, help="max Wikidata rows")
