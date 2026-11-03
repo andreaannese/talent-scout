@@ -1,21 +1,26 @@
 name: talent-scout
 on:
-  schedule: [{cron: "17 5 * * 1"}]   # every Monday
-  workflow_dispatch:
+  schedule: [{cron: "17 5 * * 1"}]   # every Monday 05:17 UTC
+  workflow_dispatch:                   # "Run workflow" button
 jobs:
   run:
     runs-on: ubuntu-latest
-    permissions: {contents: write}
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: {python-version: "3.12"}
-      - run: python scout.py
+      - name: Create or update database tables
+        run: psql "$SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -f schema.sql
         env:
-          LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
-          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
-          LLM_MODEL: ${{ secrets.LLM_MODEL }}
-      - run: |
-          git config user.name scout-bot && git config user.email scout-bot@users.noreply.github.com
-          git add scout.db people.csv && git commit -m "scout run $(date -u +%F)" || true
-          git push
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      - name: Scrape and score
+        run: python scout.py
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}

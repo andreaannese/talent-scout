@@ -198,10 +198,56 @@ def find_contact(website):
             return (pro or found)[0], ("public_business" if pro else "public_on_own_site")
     return None, None
 
+# ---------------------------------------------------------------- Storage backends
+COLS = ["key", "name", "birth_year", "age", "age_band", "achievement", "age_at_achievement", "category",
+        "score", "country", "website", "contact_email", "contact_type", "source", "source_url", "found_at"]
+
+class SupabaseStore:
+    """Online storage through Supabase's REST API (tables created by schema.sql)."""
+    def __init__(self, url, key):
+        self.base = url.rstrip("/") + "/rest/v1/"
+        self.h = {"apikey": key, "Authorization": f"Bearer {key}"}
+    def _req(self, method, path, body=None, extra=None):
+        req = urllib.request.Request(self.base + path, method=method,
+              data=json.dumps(body).encode() if body is not None else None,
+              headers={"Content-Type": "application/json", "User-Agent": UA, **self.h, **(extra or {})})
+        with urllib.request.urlopen(req, timeout=60) as r:
+            t = r.read().decode(); return json.loads(t) if t else None
+    def seen_keys(self):
+        keys, off = set(), 0
+        while True:  # memory = everything ever screened, kept or not
+            rows = self._req("GET", f"seen?select=key&limit=1000&offset={off}")
+            keys |= {r["key"] for r in rows}
+            if len(rows) < 1000: return keys
+            off += 1000
+    def mark_seen(self, keys):
+        if keys: self._req("POST", "seen?on_conflict=key", [{"key": k} for k in keys],
+                           {"Prefer": "resolution=ignore-duplicates"})
+    def save(self, row):  # never overwrites status/notes you set in the UI
+        self._req("POST", "people?on_conflict=key", [row], {"Prefer": "resolution=merge-duplicates"})
+    def close(self): pass
+
+class SqliteStore:
+    """Local fallback when Supabase is not configured."""
+    def __init__(self):
+        self.con = db()
+        self.con.execute("CREATE TABLE IF NOT EXISTS seen(key TEXT PRIMARY KEY)")
+    def seen_keys(self): return {r[0] for r in self.con.execute("SELECT key FROM seen UNION SELECT key FROM people")}
+    def mark_seen(self, keys): self.con.executemany("INSERT OR IGNORE INTO seen VALUES (?)", [(k,) for k in keys])
+    def save(self, row):
+        self.con.execute(f"INSERT OR REPLACE INTO people VALUES ({','.join('?'*len(COLS))})", [row[c] for c in COLS])
+    def close(self): self.con.commit(); export(self.con)
+
+def get_store():
+    url, key = os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_SERVICE_KEY")
+    if url and key:
+        print("Storage: Supabase"); return SupabaseStore(url, key)
+    print("Storage: local scout.db"); return SqliteStore()
+
 # ---------------------------------------------------------------- Main
 def run(args):
-    con = db()
-    seen = {r[0] for r in con.execute("SELECT key FROM people")}
+    store = get_store()
+    seen = store.seen_keys()
     items = []
     if "wikidata" in args.sources:
         print("Querying Wikidata...")
@@ -210,34 +256,40 @@ def run(args):
     if "news" in args.sources:
         print("Reading news RSS...")
         items += list(src_news(NEWS_QUERIES, args.per_query))
-    items = [i for i in items if i["key"] not in seen]
-    print(f"{len(items)} new candidates to score")
+    uniq = {}
+    for it in items:
+        if it["key"] not in seen: uniq.setdefault(it["key"], it)
+    items = list(uniq.values())[: args.max_new]
+    print(f"{len(items)} new candidates to score (memory: {len(seen)} already screened)")
 
-    kept = 0
+    kept, batch = 0, []
     for i, it in enumerate(items, 1):
         s = llm_score(it)
+        batch.append(it["key"])
         name = s.get("name") or it.get("name")
         by = it.get("birth_year") or s.get("birth_year")
         age = (THIS_YEAR - by) if by else s.get("age_now")
-        score = int(s.get("score") or 0)
-        if not name or score < args.min_score:
-            continue
-        band = age_band(age)
-        email, ctype = None, None
-        if band in ("18-20", "adult"):
-            email, ctype = find_contact(it.get("website"))
-        elif band == "minor":
-            ctype = "minor: contact via guardian/school/organizer only"
-        con.execute("INSERT OR REPLACE INTO people VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (it["key"], name, by, age, band, s.get("achievement"), s.get("age_at_achievement"),
-                     s.get("category"), score, it.get("country"), it.get("website"), email, ctype,
-                     it["source"], it["source_url"], dt.datetime.utcnow().isoformat(timespec="seconds")))
-        kept += 1
-        if i % 10 == 0: con.commit(); print(f"  {i}/{len(items)} scored, {kept} kept")
+        try: score = int(s.get("score") or 0)
+        except (TypeError, ValueError): score = 0
+        if name and score >= args.min_score:
+            band = age_band(age)
+            email, ctype = None, None
+            if band in ("18-20", "adult"):
+                email, ctype = find_contact(it.get("website"))
+            elif band == "minor":
+                ctype = "minor: contact via guardian/school/organizer only"
+            store.save(dict(zip(COLS, (it["key"], name, by, age, band, s.get("achievement"),
+                s.get("age_at_achievement"), s.get("category"), score, it.get("country"), it.get("website"),
+                email, ctype, it["source"], it["source_url"],
+                dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")))))
+            kept += 1
+        if i % 10 == 0:
+            store.mark_seen(batch); batch = []
+            print(f"  {i}/{len(items)} scored, {kept} kept")
         if CHAIN: time.sleep(args.llm_delay)
-    con.commit()
-    export(con)
-    print(f"Done. {kept} people kept. LLM usage: {USAGE or 'none (keyword mode)'}. See people.csv")
+    store.mark_seen(batch)
+    store.close()
+    print(f"Done. {kept} people kept. LLM usage: {USAGE or 'none (keyword mode)'}.")
 
 def export(con, path="people.csv"):
     cur = con.execute("SELECT * FROM people ORDER BY score DESC, age ASC")
@@ -252,5 +304,6 @@ if __name__ == "__main__":
     ap.add_argument("--limit", type=int, default=300, help="max Wikidata rows")
     ap.add_argument("--per-query", type=int, default=15, help="news items per query")
     ap.add_argument("--min-score", type=int, default=6)
+    ap.add_argument("--max-new", type=int, default=200, help="max new candidates per run (protects free quotas)")
     ap.add_argument("--llm-delay", type=float, default=2.0, help="seconds between LLM calls (free-tier rate limits)")
     run(ap.parse_args())
