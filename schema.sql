@@ -47,3 +47,40 @@ notify pgrst, 'reload schema';
 -- v2: remember which model screened each item ('keyword' items get rescreened by AI later)
 alter table seen add column if not exists scored_by text;
 notify pgrst, 'reload schema';
+
+-- v3: login allowlist. Only emails in allowed_emails can see or edit data.
+create table if not exists allowed_emails (
+  email text primary key,
+  added_at timestamptz default now()
+);
+alter table allowed_emails enable row level security;
+-- seed the owners once (only when the list is empty)
+insert into allowed_emails(email)
+  select e from (values ('owner@example.com'), ('owner2@example.com')) v(e)
+  where not exists (select 1 from allowed_emails);
+
+create or replace function public.is_allowed() returns boolean
+language sql stable security definer set search_path = public as $$
+  select exists (select 1 from allowed_emails
+                 where lower(email) = lower(coalesce(auth.jwt() ->> 'email', '')));
+$$;
+revoke execute on function public.is_allowed() from public, anon;
+grant execute on function public.is_allowed() to authenticated;
+
+drop policy if exists signed_in_full_access on people;
+drop policy if exists allowed_full_access on people;
+create policy allowed_full_access on people for all to authenticated
+  using (public.is_allowed()) with check (public.is_allowed());
+
+drop policy if exists allowed_manage on allowed_emails;
+create policy allowed_manage on allowed_emails for all to authenticated
+  using (public.is_allowed()) with check (public.is_allowed());
+grant select, insert, delete on table allowed_emails to authenticated;
+grant all on table allowed_emails to service_role;
+
+-- keep updated_at fresh when someone edits status/notes in the UI
+create or replace function public.touch_updated_at() returns trigger language plpgsql as $$
+begin new.updated_at = now(); return new; end $$;
+drop trigger if exists people_touch on people;
+create trigger people_touch before update on people for each row execute function public.touch_updated_at();
+notify pgrst, 'reload schema';

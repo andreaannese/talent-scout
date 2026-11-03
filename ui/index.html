@@ -1,0 +1,337 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Talent Scout</title>
+<meta name="robots" content="noindex, nofollow">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script src="config.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
+<style>
+:root {
+  --bg: #f7f7f5; --panel: #ffffff; --text: #1b1b1a; --muted: #6b6b66; --line: #e6e5e0;
+  --accent: #2f5bea; --accent-ink: #ffffff; --chip: #f0efea;
+  --good: #1f8a4c; --warn: #b7791f; --bad: #c0392b; --info: #2f5bea;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #131312; --panel: #1c1c1b; --text: #ecebe6; --muted: #9b9a94; --line: #2c2c2a;
+    --accent: #6d8dff; --accent-ink: #0d0d0c; --chip: #262624;
+    --good: #4cc27f; --warn: #e0a84a; --bad: #ef6b5b; --info: #6d8dff;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #131312; --panel: #1c1c1b; --text: #ecebe6; --muted: #9b9a94; --line: #2c2c2a;
+  --accent: #6d8dff; --accent-ink: #0d0d0c; --chip: #262624;
+  --good: #4cc27f; --warn: #e0a84a; --bad: #ef6b5b; --info: #6d8dff;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 Inter, system-ui, sans-serif; }
+button, input, select, textarea { font: inherit; color: inherit; }
+a { color: var(--accent); text-decoration: none; } a:hover { text-decoration: underline; }
+.hidden { display: none !important; }
+.wrap { max-width: 1240px; margin: 0 auto; padding: 20px 16px 60px; }
+header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 18px; }
+header h1 { font-size: 18px; margin: 0; font-weight: 700; letter-spacing: -0.01em; }
+header .sp { flex: 1; }
+.tabs { display: flex; gap: 4px; background: var(--chip); padding: 3px; border-radius: 9px; }
+.tabs button { border: 0; background: none; padding: 6px 12px; border-radius: 7px; cursor: pointer; color: var(--muted); }
+.tabs button.on { background: var(--panel); color: var(--text); box-shadow: 0 1px 2px rgba(0,0,0,.08); }
+.btn { border: 1px solid var(--line); background: var(--panel); padding: 7px 12px; border-radius: 8px; cursor: pointer; }
+.btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
+.btn:disabled { opacity: .5; cursor: default; }
+.muted { color: var(--muted); }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; }
+/* login */
+.login { max-width: 380px; margin: 12vh auto 0; padding: 28px; }
+.login h1 { font-size: 20px; margin: 0 0 6px; }
+.login input { width: 100%; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); margin: 16px 0 10px; }
+.login .btn { width: 100%; padding: 10px; }
+.msg { margin-top: 12px; font-size: 13px; }
+/* stats */
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; margin-bottom: 14px; }
+.stat { padding: 12px 14px; cursor: pointer; }
+.stat .n { font-size: 22px; font-weight: 700; }
+.stat .l { color: var(--muted); font-size: 12px; text-transform: capitalize; }
+.stat.on { outline: 2px solid var(--accent); }
+/* filters */
+.filters { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+.filters input, .filters select { padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+.filters input[type=search] { flex: 1; min-width: 180px; }
+/* cards */
+.list { display: flex; flex-direction: column; gap: 8px; }
+.row { display: grid; grid-template-columns: 52px 1fr 220px; gap: 14px; padding: 14px; align-items: start; }
+.score { width: 44px; height: 44px; border-radius: 10px; display: grid; place-items: center; font-weight: 700; font-size: 17px; background: var(--chip); }
+.score.s9 { background: color-mix(in srgb, var(--good) 22%, transparent); color: var(--good); }
+.score.s7 { background: color-mix(in srgb, var(--info) 18%, transparent); color: var(--info); }
+.name { font-weight: 600; font-size: 15px; }
+.meta { display: flex; gap: 6px; flex-wrap: wrap; margin: 4px 0 6px; }
+.chip { background: var(--chip); border-radius: 999px; padding: 1px 9px; font-size: 12px; color: var(--muted); }
+.chip.minor { color: var(--warn); }
+.ach { margin: 0 0 6px; }
+.contact { font-size: 13px; }
+.side { display: flex; flex-direction: column; gap: 6px; }
+.side select, .side textarea { width: 100%; padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); }
+.side textarea { min-height: 54px; resize: vertical; font-size: 13px; }
+.st-new { border-left: 3px solid var(--line); } .st-shortlisted { border-left: 3px solid var(--info); }
+.st-contacted { border-left: 3px solid var(--good); } .st-rejected { border-left: 3px solid var(--bad); opacity: .65; }
+.saved { font-size: 11px; color: var(--good); height: 14px; }
+.empty { padding: 40px; text-align: center; color: var(--muted); }
+/* access */
+.access { padding: 18px; max-width: 560px; }
+.access form { display: flex; gap: 8px; margin: 12px 0 16px; }
+.access input { flex: 1; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); }
+.access li { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--line); }
+.access ul { list-style: none; padding: 0; margin: 0; }
+.linkbtn { border: 0; background: none; color: var(--bad); cursor: pointer; }
+@media (max-width: 760px) {
+  .row { grid-template-columns: 44px 1fr; }
+  .side { grid-column: 1 / -1; }
+  .score { width: 38px; height: 38px; font-size: 15px; }
+}
+</style>
+</head>
+<body>
+
+<!-- Login -->
+<div id="loginView" class="hidden">
+  <div class="panel login">
+    <h1>Talent Scout</h1>
+    <div class="muted">Sign in with an authorised email. We'll send you a sign-in link.</div>
+    <form id="loginForm">
+      <input id="email" type="email" required placeholder="you@example.com" autocomplete="email">
+      <button class="btn primary" id="loginBtn">Send sign-in link</button>
+    </form>
+    <div id="loginMsg" class="msg muted"></div>
+  </div>
+</div>
+
+<!-- Not authorised -->
+<div id="deniedView" class="hidden">
+  <div class="panel login">
+    <h1>No access</h1>
+    <p class="muted"><span id="deniedEmail"></span> is not on the list of authorised emails. Ask an admin to add you.</p>
+    <button class="btn" onclick="signOut()">Sign out</button>
+  </div>
+</div>
+
+<!-- App -->
+<div id="appView" class="hidden">
+  <div class="wrap">
+    <header>
+      <h1>Talent Scout</h1>
+      <div class="tabs">
+        <button data-tab="people" class="on">People</button>
+        <button data-tab="access">Access</button>
+      </div>
+      <div class="sp"></div>
+      <span class="muted" id="who"></span>
+      <button class="btn" onclick="signOut()">Sign out</button>
+    </header>
+
+    <section id="tab-people">
+      <div class="stats" id="stats"></div>
+      <div class="filters">
+        <input type="search" id="q" placeholder="Search name, achievement, notes">
+        <select id="fCat"><option value="">All categories</option>
+          <option>tech</option><option>science</option><option>art</option><option>business</option><option>sport</option><option>other</option></select>
+        <select id="fBand"><option value="">All ages</option>
+          <option value="minor">Under 18</option><option value="18-20">18 to 20</option><option value="adult">21+</option><option value="unknown">Unknown</option></select>
+        <select id="fScore"><option value="0">Any score</option><option value="7">7+</option><option value="8">8+</option><option value="9">9+</option></select>
+        <select id="fContact"><option value="">Any contact</option><option value="email">Has email</option><option value="none">No email</option></select>
+        <select id="sort"><option value="score">Sort: score</option><option value="found_at">Sort: newest</option><option value="age">Sort: youngest</option></select>
+        <button class="btn" onclick="exportCsv()">Export CSV</button>
+      </div>
+      <div class="list" id="list"></div>
+    </section>
+
+    <section id="tab-access" class="hidden">
+      <div class="panel access">
+        <strong>Authorised emails</strong>
+        <div class="muted" style="font-size:13px;margin-top:4px">Only these people can sign in and see the data.</div>
+        <form id="addForm">
+          <input id="newEmail" type="email" required placeholder="name@company.com">
+          <button class="btn primary">Add</button>
+        </form>
+        <ul id="emails"></ul>
+      </div>
+    </section>
+  </div>
+</div>
+
+<script>
+const cfg = window.SCOUT_CONFIG || {};
+const sb = supabase.createClient(cfg.supabaseUrl, cfg.supabasePublishableKey);
+const $ = (id) => document.getElementById(id);
+const STATUSES = ["new", "shortlisted", "contacted", "rejected"];
+let people = [], statusFilter = "", me = null;
+
+function show(view) {
+  for (const v of ["loginView", "deniedView", "appView"]) $(v).classList.toggle("hidden", v !== view);
+}
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+// ---------- auth
+$("loginForm").onsubmit = async (e) => {
+  e.preventDefault();
+  $("loginBtn").disabled = true; $("loginMsg").textContent = "Sending...";
+  const { error } = await sb.auth.signInWithOtp({
+    email: $("email").value.trim(),
+    options: { emailRedirectTo: location.origin + location.pathname },
+  });
+  $("loginBtn").disabled = false;
+  $("loginMsg").textContent = error ? "Error: " + error.message : "Check your inbox and click the sign-in link.";
+};
+async function signOut() { await sb.auth.signOut(); show("loginView"); }
+
+async function boot() {
+  const { data: { session } } = await sb.auth.getSession();
+  if (!session) return show("loginView");
+  me = session.user.email;
+  const { data: ok, error } = await sb.rpc("is_allowed");
+  if (error || !ok) { $("deniedEmail").textContent = me; return show("deniedView"); }
+  $("who").textContent = me;
+  show("appView");
+  await loadPeople();
+}
+sb.auth.onAuthStateChange((ev) => { if (ev === "SIGNED_IN" || ev === "SIGNED_OUT") boot(); });
+
+// ---------- tabs
+document.querySelectorAll(".tabs button").forEach((b) => b.onclick = () => {
+  document.querySelectorAll(".tabs button").forEach((x) => x.classList.toggle("on", x === b));
+  $("tab-people").classList.toggle("hidden", b.dataset.tab !== "people");
+  $("tab-access").classList.toggle("hidden", b.dataset.tab !== "access");
+  if (b.dataset.tab === "access") loadEmails();
+});
+
+// ---------- people
+async function loadPeople() {
+  $("list").innerHTML = '<div class="empty">Loading...</div>';
+  let all = [], from = 0;
+  while (true) {
+    const { data, error } = await sb.from("people").select("*").range(from, from + 999);
+    if (error) { $("list").innerHTML = `<div class="empty">Error: ${esc(error.message)}</div>`; return; }
+    all = all.concat(data);
+    if (data.length < 1000) break;
+    from += 1000;
+  }
+  people = all;
+  render();
+}
+
+function filtered() {
+  const q = $("q").value.toLowerCase(), cat = $("fCat").value, band = $("fBand").value,
+        min = +$("fScore").value, contact = $("fContact").value, sort = $("sort").value;
+  let r = people.filter((p) =>
+    (!statusFilter || p.status === statusFilter) &&
+    (!cat || p.category === cat) && (!band || p.age_band === band) && (p.score || 0) >= min &&
+    (!contact || (contact === "email" ? !!p.contact_email : !p.contact_email)) &&
+    (!q || [p.name, p.achievement, p.notes, p.country].join(" ").toLowerCase().includes(q)));
+  const by = {
+    score: (a, b) => (b.score || 0) - (a.score || 0) || (a.age ?? 99) - (b.age ?? 99),
+    found_at: (a, b) => String(b.found_at).localeCompare(String(a.found_at)),
+    age: (a, b) => (a.age ?? 99) - (b.age ?? 99),
+  }[sort];
+  return r.sort(by);
+}
+
+function renderStats() {
+  const counts = Object.fromEntries(STATUSES.map((s) => [s, 0]));
+  people.forEach((p) => counts[p.status] = (counts[p.status] || 0) + 1);
+  const cells = [["", "all", people.length], ...STATUSES.map((s) => [s, s, counts[s] || 0])];
+  $("stats").innerHTML = cells.map(([key, label, n]) =>
+    `<div class="panel stat ${statusFilter === key ? "on" : ""}" data-s="${key}"><div class="n">${n}</div><div class="l">${label}</div></div>`).join("");
+  $("stats").querySelectorAll(".stat").forEach((el) => el.onclick = () => { statusFilter = el.dataset.s; render(); });
+}
+
+function render() {
+  renderStats();
+  const rows = filtered();
+  if (!rows.length) { $("list").innerHTML = '<div class="panel empty">No people match these filters.</div>'; return; }
+  $("list").innerHTML = rows.map((p) => {
+    const sc = p.score >= 9 ? "s9" : p.score >= 7 ? "s7" : "";
+    const age = p.age != null ? `age ${p.age}` : "age ?";
+    const contact = p.contact_email
+      ? `<a href="mailto:${esc(p.contact_email)}">${esc(p.contact_email)}</a> <span class="muted">(${esc(p.contact_type || "")})</span>`
+      : `<span class="muted">${esc(p.contact_type || "No email found")}</span>`;
+    return `<div class="panel row st-${esc(p.status)}" data-key="${esc(p.key)}">
+      <div class="score ${sc}">${p.score ?? "?"}</div>
+      <div>
+        <div class="name">${esc(p.name)}</div>
+        <div class="meta">
+          <span class="chip ${p.age_band === "minor" ? "minor" : ""}">${age}${p.age_band === "minor" ? " · minor" : ""}</span>
+          ${p.age_at_achievement ? `<span class="chip">did it at ${esc(p.age_at_achievement)}</span>` : ""}
+          ${p.category ? `<span class="chip">${esc(p.category)}</span>` : ""}
+          ${p.country ? `<span class="chip">${esc(p.country)}</span>` : ""}
+          <span class="chip">${esc(p.source)}</span>
+        </div>
+        <p class="ach">${esc(p.achievement)}</p>
+        <div class="contact">${contact}
+          ${p.source_url ? ` · <a href="${esc(p.source_url)}" target="_blank" rel="noopener">source</a>` : ""}
+          ${p.website ? ` · <a href="${esc(p.website)}" target="_blank" rel="noopener">website</a>` : ""}</div>
+      </div>
+      <div class="side">
+        <select data-f="status">${STATUSES.map((s) => `<option ${s === p.status ? "selected" : ""}>${s}</option>`).join("")}</select>
+        <textarea data-f="notes" placeholder="Notes">${esc(p.notes)}</textarea>
+        <div class="saved"></div>
+      </div>
+    </div>`;
+  }).join("");
+  $("list").querySelectorAll(".row").forEach((row) => {
+    const key = row.dataset.key;
+    row.querySelector('[data-f="status"]').onchange = (e) => save(key, { status: e.target.value }, row, true);
+    row.querySelector('[data-f="notes"]').onblur = (e) => {
+      const p = people.find((x) => x.key === key);
+      if ((p.notes || "") !== e.target.value) save(key, { notes: e.target.value }, row, false);
+    };
+  });
+}
+
+async function save(key, patch, row, rerender) {
+  const flag = row.querySelector(".saved");
+  flag.textContent = "Saving...";
+  const { error } = await sb.from("people").update(patch).eq("key", key);
+  if (error) { flag.style.color = "var(--bad)"; flag.textContent = "Error: " + error.message; return; }
+  Object.assign(people.find((x) => x.key === key), patch);
+  flag.textContent = "Saved";
+  if (rerender) render();
+}
+
+["q", "fCat", "fBand", "fScore", "fContact", "sort"].forEach((id) => $(id).addEventListener("input", render));
+
+function exportCsv() {
+  const cols = ["name", "score", "age", "age_band", "category", "achievement", "age_at_achievement", "country",
+                "contact_email", "contact_type", "website", "source", "source_url", "status", "notes"];
+  const q = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+  const csv = [cols.join(","), ...filtered().map((p) => cols.map((c) => q(p[c])).join(","))].join("\n");
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
+  a.download = `talent-scout-${new Date().toISOString().slice(0, 10)}.csv`;
+  a.click();
+}
+
+// ---------- access list
+async function loadEmails() {
+  const { data, error } = await sb.from("allowed_emails").select("*").order("added_at");
+  if (error) { $("emails").innerHTML = `<li>Error: ${esc(error.message)}</li>`; return; }
+  $("emails").innerHTML = data.map((r) => `<li><span>${esc(r.email)}</span>
+    ${r.email.toLowerCase() === me.toLowerCase() ? '<span class="muted">you</span>'
+      : `<button class="linkbtn" data-e="${esc(r.email)}">Remove</button>`}</li>`).join("");
+  $("emails").querySelectorAll("button").forEach((b) => b.onclick = async () => {
+    if (!confirm(`Remove ${b.dataset.e}?`)) return;
+    await sb.from("allowed_emails").delete().eq("email", b.dataset.e); loadEmails();
+  });
+}
+$("addForm").onsubmit = async (e) => {
+  e.preventDefault();
+  const email = $("newEmail").value.trim().toLowerCase();
+  const { error } = await sb.from("allowed_emails").insert({ email });
+  if (error) alert(error.message); else { $("newEmail").value = ""; loadEmails(); }
+};
+
+boot();
+</script>
+</body>
+</html>

@@ -1,6 +1,6 @@
 name: talent-scout
 on:
-  schedule: [{cron: "17 5 * * 1"}]   # every Monday 05:17 UTC
+  schedule: [{cron: "17 5 * * *"}]   # every day 05:17 UTC
   workflow_dispatch:                   # "Run workflow" button
 jobs:
   run:
@@ -15,7 +15,9 @@ jobs:
         env:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
       - name: Scrape and score
-        run: python scout.py
+        # Wikidata (slow, 1 query/min) only on Mondays to stay well inside free GitHub minutes
+        run: |
+          if [ "$(date -u +%u)" = "1" ]; then python scout.py; else python scout.py --sources news wikipedia; fi
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
