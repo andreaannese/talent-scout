@@ -1,0 +1,9 @@
+// Cloudflare Workers: serve the static web interface in ./ui (no server code).
+{
+  "name": "talent-scout",
+  "compatibility_date": "2025-09-01",
+  "assets": {
+    "directory": "./ui",
+    "not_found_handling": "single-page-application"
+  }
+}
