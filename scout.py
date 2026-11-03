@@ -206,7 +206,9 @@ class SupabaseStore:
     """Online storage through Supabase's REST API (tables created by schema.sql)."""
     def __init__(self, url, key):
         self.base = url.rstrip("/") + "/rest/v1/"
-        self.h = {"apikey": key, "Authorization": f"Bearer {key}"}
+        self.h = {"apikey": key}
+        if key.startswith("eyJ"):  # legacy service_role JWT also goes in Authorization
+            self.h["Authorization"] = f"Bearer {key}"
     def _req(self, method, path, body=None, extra=None):
         req = urllib.request.Request(self.base + path, method=method,
               data=json.dumps(body).encode() if body is not None else None,
