@@ -205,7 +205,8 @@ COLS = ["key", "name", "birth_year", "age", "age_band", "achievement", "age_at_a
 class SupabaseStore:
     """Online storage through Supabase's REST API (tables created by schema.sql)."""
     def __init__(self, url, key):
-        self.base = url.rstrip("/") + "/rest/v1/"
+        u = urllib.parse.urlparse(url.strip())          # keep only https://xxxx.supabase.co
+        self.base = f"{u.scheme or 'https'}://{u.netloc or u.path.split('/')[0]}/rest/v1/"
         self.h = {"apikey": key}
         if key.startswith("eyJ"):  # legacy service_role JWT also goes in Authorization
             self.h["Authorization"] = f"Bearer {key}"
