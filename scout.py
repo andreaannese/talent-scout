@@ -62,6 +62,8 @@ WIKIDATA_QUERY = """SELECT ?p ?pLabel ?birth ?desc ?site ?countryLabel WHERE {
   SERVICE wikibase:label { bd:serviceParam wikibase:language "en". }
 } LIMIT %(limit)d"""
 
+WIKIDATA_PAUSE = int(os.environ.get("WIKIDATA_PAUSE", "62"))  # public endpoint: max 1 query/min right now
+
 def src_wikidata(min_age, max_age, limit):
     per = max(10, limit // len(OCCUPATIONS))
     done = set()
@@ -73,7 +75,7 @@ def src_wikidata(min_age, max_age, limit):
                 data = json.loads(get(url, timeout=70, headers={"Accept": "application/sparql-results+json"})); break
             except Exception as e:
                 print(f"  wikidata {label} failed ({e}){', retrying' if attempt == 0 else ''}", file=sys.stderr)
-                data = None; time.sleep(5)
+                data = None; time.sleep(WIKIDATA_PAUSE)
         if not data: continue
         n = 0
         for b in data["results"]["bindings"]:
@@ -87,7 +89,7 @@ def src_wikidata(min_age, max_age, limit):
                    "website": v("site"), "country": v("countryLabel"),
                    "source": "wikidata", "source_url": v("p")}
         print(f"  wikidata {label}: {n}")
-        time.sleep(2)
+        time.sleep(WIKIDATA_PAUSE)
 
 # ---------------------------------------------------------------- Source 2: News RSS
 NEWS_QUERIES = [
@@ -122,21 +124,52 @@ Current year: {year}. From the text, return ONLY a JSON object:
 Text: {text}"""
 
 # Free models, best first. Each is used until its free quota runs out, then the next one.
+# Model names change often, so each provider is asked which models it offers right now and the
+# best match for "prefer" (first pattern that matches, newest version) is picked automatically.
+# "model" is only a fallback if the provider's model list can't be read.
 # A provider is skipped when its API key env var is missing. Override with LLM_CHAIN (JSON list).
 DEFAULT_CHAIN = [
-    {"name": "gemini-pro",   "base": "https://generativelanguage.googleapis.com/v1beta/openai", "model": "gemini-2.5-pro",   "key_env": "GEMINI_API_KEY"},
-    {"name": "gemini-flash", "base": "https://generativelanguage.googleapis.com/v1beta/openai", "model": "gemini-2.5-flash", "key_env": "GEMINI_API_KEY"},
-    {"name": "groq-llama",   "base": "https://api.groq.com/openai/v1",  "model": "llama-3.3-70b-versatile",           "key_env": "GROQ_API_KEY"},
-    {"name": "cerebras",     "base": "https://api.cerebras.ai/v1",      "model": "llama-3.3-70b",                     "key_env": "CEREBRAS_API_KEY"},
-    {"name": "openrouter-ds","base": "https://openrouter.ai/api/v1",    "model": "deepseek/deepseek-chat-v3-0324:free","key_env": "OPENROUTER_API_KEY"},
-    {"name": "mistral",      "base": "https://api.mistral.ai/v1",       "model": "mistral-small-latest",              "key_env": "MISTRAL_API_KEY"},
+    {"name": "gemini-pro",   "base": "https://generativelanguage.googleapis.com/v1beta/openai", "key_env": "GEMINI_API_KEY",
+     "prefer": [r"^gemini-[\d.]+-pro$", r"^gemini-[\d.]+-pro-latest$", r"^gemini-pro-latest$"], "model": "gemini-2.5-pro"},
+    {"name": "gemini-flash", "base": "https://generativelanguage.googleapis.com/v1beta/openai", "key_env": "GEMINI_API_KEY",
+     "prefer": [r"^gemini-[\d.]+-flash$", r"^gemini-flash-latest$", r"^gemini-[\d.]+-flash-lite$"], "model": "gemini-2.5-flash"},
+    {"name": "groq",         "base": "https://api.groq.com/openai/v1", "key_env": "GROQ_API_KEY",
+     "prefer": [r"gpt-oss-120b", r"llama-4-maverick", r"kimi-k2", r"llama-3\.3-70b", r"qwen", r"llama"], "model": "llama-3.3-70b-versatile"},
+    {"name": "cerebras",     "base": "https://api.cerebras.ai/v1", "key_env": "CEREBRAS_API_KEY",
+     "prefer": [r"gpt-oss-120b", r"qwen-3-235b", r"llama-?4", r"llama"], "model": "llama-3.3-70b"},
+    {"name": "openrouter",   "base": "https://openrouter.ai/api/v1", "key_env": "OPENROUTER_API_KEY",
+     "prefer": [r"deepseek.*:free$", r"qwen3.*:free$", r"llama-4.*:free$", r"gpt-oss.*:free$", r":free$"], "model": "deepseek/deepseek-chat-v3-0324:free"},
+    {"name": "mistral",      "base": "https://api.mistral.ai/v1", "key_env": "MISTRAL_API_KEY",
+     "prefer": [r"^mistral-medium-latest$", r"^mistral-small-latest$"], "model": "mistral-small-latest"},
 ]
+
+def _version_key(model_id):
+    return [int(n) for n in re.findall(r"\d+", model_id)]
+
+def resolve_model(p):
+    """Ask the provider for its current models and pick the best one for this slot."""
+    if p.get("_resolved"): return p["model"]
+    p["_resolved"] = True
+    try:
+        req = urllib.request.Request(p["base"].rstrip("/") + "/models",
+              headers={"Authorization": f"Bearer {os.environ.get(p['key_env'], '')}", "User-Agent": UA})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            ids = [m["id"].removeprefix("models/") for m in json.loads(r.read()).get("data", [])]
+        bad = re.compile(r"preview|exp|tts|audio|image|vision|embed|guard|whisper|search|live|thinking", re.I)
+        for pat in p.get("prefer", []):
+            hits = [i for i in ids if re.search(pat, i) and not bad.search(i)]
+            if hits:
+                p["model"] = max(hits, key=_version_key); break
+    except Exception as e:
+        print(f"  {p['name']}: could not list models ({e}), using {p['model']}", file=sys.stderr)
+    print(f"  {p['name']}: using model {p['model']}")
+    return p["model"]
 
 def load_chain():
     chain = json.loads(os.environ["LLM_CHAIN"]) if os.environ.get("LLM_CHAIN") else DEFAULT_CHAIN
     if os.environ.get("LLM_BASE_URL"):  # single custom endpoint still supported
         chain = [{"name": "custom", "base": os.environ["LLM_BASE_URL"], "model": os.environ.get("LLM_MODEL"),
-                  "key_env": "LLM_API_KEY"}] + chain
+                  "key_env": "LLM_API_KEY", "_resolved": True}] + chain
     return [p for p in chain if os.environ.get(p["key_env"]) or "localhost" in p["base"]]
 
 CHAIN = load_chain()
@@ -153,7 +186,7 @@ def llm_score(item):
     prompt = LLM_PROMPT.format(year=THIS_YEAR, text=item["text"][:2000])
     for p in CHAIN:
         if p["name"] in EXHAUSTED: continue
-        payload = {"model": p["model"], "temperature": 0, "messages": [{"role": "user", "content": prompt}]}
+        payload = {"model": resolve_model(p), "temperature": 0, "messages": [{"role": "user", "content": prompt}]}
         headers = {"Authorization": f"Bearer {os.environ.get(p['key_env'], '')}"}
         for attempt in range(3):
             try:
@@ -169,7 +202,7 @@ def llm_score(item):
                     EXHAUSTED.add(p["name"]); break
                 if e.code == 429:  # per-minute limit: wait and retry same model
                     time.sleep(15 * (attempt + 1)); continue
-                print(f"  {p['name']}: HTTP {e.code}, trying next model", file=sys.stderr)
+                print(f"  {p['name']} ({p['model']}): HTTP {e.code} {body[:200]}, trying next model", file=sys.stderr)
                 EXHAUSTED.add(p["name"]); break
             except Exception as e:  # bad JSON from model: try next model for this item only
                 print(f"  {p['name']}: unusable answer ({e})", file=sys.stderr); break
