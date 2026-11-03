@@ -48,35 +48,46 @@ def age_band(age):
     return "adult"
 
 # ---------------------------------------------------------------- Source 1: Wikidata
-# Occupations / fields that signal "did something remarkable young".
-WIKIDATA_QUERY = """
-SELECT ?p ?pLabel ?birth ?desc ?site ?countryLabel (GROUP_CONCAT(DISTINCT ?occLabel; separator=", ") AS ?occs) WHERE {
-  VALUES ?occ { wd:Q1622272 wd:Q82594 wd:Q5482740 wd:Q205375 wd:Q131524 wd:Q483501
-                wd:Q639669 wd:Q1028181 wd:Q33999 wd:Q36180 wd:Q901 wd:Q177220 wd:Q170790 }
-  ?p wdt:P31 wd:Q5; wdt:P106 ?occ; wdt:P569 ?birth.
-  FILTER(YEAR(?birth) >= %(min_year)d && YEAR(?birth) <= %(max_year)d)
+# One small query per occupation (one big query times out on the free public endpoint).
+OCCUPATIONS = {"Q1622272": "hacker", "Q5482740": "programmer", "Q82594": "computer scientist",
+               "Q205375": "inventor", "Q131524": "entrepreneur", "Q170790": "mathematician",
+               "Q901": "scientist", "Q483501": "artist", "Q1028181": "painter", "Q639669": "musician",
+               "Q177220": "singer", "Q36180": "writer", "Q33999": "actor", "Q2066131": "athlete"}
+WIKIDATA_QUERY = """SELECT ?p ?pLabel ?birth ?desc ?site ?countryLabel WHERE {
+  ?p wdt:P106 wd:%(occ)s; wdt:P569 ?birth.
+  FILTER(?birth >= "%(min_year)d-01-01T00:00:00Z"^^xsd:dateTime && ?birth <= "%(max_year)d-12-31T00:00:00Z"^^xsd:dateTime)
   OPTIONAL { ?p wdt:P856 ?site. }
   OPTIONAL { ?p wdt:P27 ?country. }
   OPTIONAL { ?p schema:description ?desc FILTER(LANG(?desc)="en") }
-  ?occ rdfs:label ?occLabel FILTER(LANG(?occLabel)="en")
   SERVICE wikibase:label { bd:serviceParam wikibase:language "en". }
-} GROUP BY ?p ?pLabel ?birth ?desc ?site ?countryLabel LIMIT %(limit)d
-"""
-# Q1622272 hacker, Q82594 computer scientist, Q5482740 programmer, Q205375 inventor,
-# Q131524 entrepreneur, Q483501 artist, Q639669 musician, Q1028181 painter,
-# Q33999 actor, Q36180 writer, Q901 scientist, Q177220 singer, Q170790 mathematician
+} LIMIT %(limit)d"""
 
 def src_wikidata(min_age, max_age, limit):
-    q = WIKIDATA_QUERY % {"min_year": THIS_YEAR - max_age, "max_year": THIS_YEAR - min_age, "limit": limit}
-    url = "https://query.wikidata.org/sparql?format=json&query=" + urllib.parse.quote(q)
-    data = json.loads(get(url, timeout=90))
-    for b in data["results"]["bindings"]:
-        v = lambda k: b.get(k, {}).get("value")
-        by = int(v("birth")[:4]) if v("birth") and v("birth")[0].isdigit() else None
-        yield {"key": "wd:" + v("p").rsplit("/", 1)[-1], "name": v("pLabel"), "birth_year": by,
-               "text": f"{v('pLabel')}: {v('desc') or ''}. Occupations: {v('occs')}",
-               "website": v("site"), "country": v("countryLabel"),
-               "source": "wikidata", "source_url": v("p")}
+    per = max(10, limit // len(OCCUPATIONS))
+    done = set()
+    for occ, label in OCCUPATIONS.items():
+        q = WIKIDATA_QUERY % {"occ": occ, "min_year": THIS_YEAR - max_age, "max_year": THIS_YEAR - min_age, "limit": per}
+        url = "https://query.wikidata.org/sparql?format=json&query=" + urllib.parse.quote(q)
+        for attempt in range(2):
+            try:
+                data = json.loads(get(url, timeout=70, headers={"Accept": "application/sparql-results+json"})); break
+            except Exception as e:
+                print(f"  wikidata {label} failed ({e}){', retrying' if attempt == 0 else ''}", file=sys.stderr)
+                data = None; time.sleep(5)
+        if not data: continue
+        n = 0
+        for b in data["results"]["bindings"]:
+            v = lambda k: b.get(k, {}).get("value")
+            qid = v("p").rsplit("/", 1)[-1]
+            if qid in done or not v("pLabel") or v("pLabel") == qid: continue
+            done.add(qid); n += 1
+            by = int(v("birth")[:4]) if v("birth") and v("birth")[0].isdigit() else None
+            yield {"key": "wd:" + qid, "name": v("pLabel"), "birth_year": by,
+                   "text": f"{v('pLabel')} ({label}, born {by}): {v('desc') or ''}",
+                   "website": v("site"), "country": v("countryLabel"),
+                   "source": "wikidata", "source_url": v("p")}
+        print(f"  wikidata {label}: {n}")
+        time.sleep(2)
 
 # ---------------------------------------------------------------- Source 2: News RSS
 NEWS_QUERIES = [
@@ -131,6 +142,7 @@ def load_chain():
 CHAIN = load_chain()
 EXHAUSTED = set()          # providers whose quota ran out during this run
 USAGE = {}                 # provider -> successful calls (printed at the end)
+LAST_MODEL = [None]        # model that scored the latest item
 
 def _is_quota_error(code, body):
     b = body.lower()
@@ -148,6 +160,7 @@ def llm_score(item):
                 r = post_json(p["base"].rstrip("/") + "/chat/completions", payload, headers)
                 out = r["choices"][0]["message"]["content"]
                 USAGE[p["name"]] = USAGE.get(p["name"], 0) + 1
+                LAST_MODEL[0] = p["name"]
                 return json.loads(re.search(r"\{.*\}", out, re.S).group(0))
             except urllib.error.HTTPError as e:
                 body = e.read().decode("utf-8", "replace") if hasattr(e, "read") else ""
@@ -223,13 +236,13 @@ class SupabaseStore:
     def seen_keys(self):
         keys, off = set(), 0
         while True:  # memory = everything ever screened, kept or not
-            rows = self._req("GET", f"seen?select=key&limit=1000&offset={off}")
+            rows = self._req("GET", f"seen?select=key&scored_by=not.is.null&scored_by=neq.keyword&limit=1000&offset={off}")
             keys |= {r["key"] for r in rows}
             if len(rows) < 1000: return keys
             off += 1000
     def mark_seen(self, keys):
-        if keys: self._req("POST", "seen?on_conflict=key", [{"key": k} for k in keys],
-                           {"Prefer": "resolution=ignore-duplicates"})
+        if keys: self._req("POST", "seen?on_conflict=key", [{"key": k, "scored_by": m} for k, m in keys],
+                           {"Prefer": "resolution=merge-duplicates"})
     def save(self, row):  # never overwrites status/notes you set in the UI
         self._req("POST", "people?on_conflict=key", [row], {"Prefer": "resolution=merge-duplicates"})
     def close(self): pass
@@ -238,9 +251,9 @@ class SqliteStore:
     """Local fallback when Supabase is not configured."""
     def __init__(self):
         self.con = db()
-        self.con.execute("CREATE TABLE IF NOT EXISTS seen(key TEXT PRIMARY KEY)")
-    def seen_keys(self): return {r[0] for r in self.con.execute("SELECT key FROM seen UNION SELECT key FROM people")}
-    def mark_seen(self, keys): self.con.executemany("INSERT OR IGNORE INTO seen VALUES (?)", [(k,) for k in keys])
+        self.con.execute("CREATE TABLE IF NOT EXISTS seen(key TEXT PRIMARY KEY, scored_by TEXT)")
+    def seen_keys(self): return {r[0] for r in self.con.execute("SELECT key FROM seen WHERE scored_by IS NOT NULL AND scored_by != 'keyword'")}
+    def mark_seen(self, keys): self.con.executemany("INSERT OR REPLACE INTO seen VALUES (?,?)", keys)
     def save(self, row):
         self.con.execute(f"INSERT OR REPLACE INTO people VALUES ({','.join('?'*len(COLS))})", [row[c] for c in COLS])
     def close(self): self.con.commit(); export(self.con)
@@ -271,8 +284,9 @@ def run(args):
 
     kept, batch = 0, []
     for i, it in enumerate(items, 1):
+        before = sum(USAGE.values())
         s = llm_score(it)
-        batch.append(it["key"])
+        batch.append((it["key"], LAST_MODEL[0] if sum(USAGE.values()) > before else "keyword"))
         name = s.get("name") or it.get("name")
         by = it.get("birth_year") or s.get("birth_year")
         age = (THIS_YEAR - by) if by else s.get("age_now")

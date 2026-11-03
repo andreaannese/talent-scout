@@ -43,3 +43,7 @@ grant usage on schema public to service_role, authenticated;
 grant all on table people, seen to service_role;
 grant select, insert, update, delete on table people to authenticated;
 notify pgrst, 'reload schema';
+
+-- v2: remember which model screened each item ('keyword' items get rescreened by AI later)
+alter table seen add column if not exists scored_by text;
+notify pgrst, 'reload schema';
