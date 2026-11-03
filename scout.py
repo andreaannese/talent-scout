@@ -220,6 +220,7 @@ CHAIN = load_chain()
 EXHAUSTED = set()          # providers whose quota ran out during this run
 USAGE = {}                 # provider -> successful calls (printed at the end)
 LAST_MODEL = [None]        # model that scored the latest item
+KEPT = []                  # people kept this run, printed at the end
 
 def _is_quota_error(code, body):
     b = body.lower()
@@ -244,7 +245,7 @@ def llm_score(item):
                 if _is_quota_error(e.code, body):
                     print(f"  {p['name']}: free quota used up, switching to next model", file=sys.stderr)
                     EXHAUSTED.add(p["name"]); break
-                if e.code == 429:  # per-minute limit: wait and retry same model
+                if e.code == 429 or e.code >= 500:  # per-minute limit or overloaded: wait, retry same model
                     time.sleep(15 * (attempt + 1)); continue
                 print(f"  {p['name']} ({p['model']}): HTTP {e.code} {body[:200]}, trying next model", file=sys.stderr)
                 EXHAUSTED.add(p["name"]); break
@@ -384,12 +385,15 @@ def run(args):
                 email, ctype, it["source"], it["source_url"],
                 dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")))))
             kept += 1
+            KEPT.append((score, name, age, (s.get("achievement") or "")[:110]))
         if i % 10 == 0:
             store.mark_seen(batch); batch = []
             print(f"  {i}/{len(items)} scored, {kept} kept")
         if CHAIN: time.sleep(args.llm_delay)
     store.mark_seen(batch)
     store.close()
+    for sc, nm, ag, ach in sorted(KEPT, key=lambda k: -k[0]):
+        print(f"  [{sc}] {nm} (age {ag if ag is not None else '?'}): {ach}")
     print(f"Done. {kept} people kept. LLM usage: {USAGE or 'none (keyword mode)'}.")
 
 def export(con, path="people.csv"):
