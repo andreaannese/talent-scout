@@ -163,7 +163,9 @@ header .sp { flex: 1; }
 
 <script>
 const cfg = window.SCOUT_CONFIG || {};
-const sb = supabase.createClient(cfg.supabaseUrl, cfg.supabasePublishableKey);
+const sb = supabase.createClient(cfg.supabaseUrl, cfg.supabasePublishableKey, {
+  auth: { detectSessionInUrl: false, persistSession: true, flowType: "implicit" },
+});
 const $ = (id) => document.getElementById(id);
 const STATUSES = ["new", "shortlisted", "contacted", "rejected"];
 let people = [], statusFilter = "", me = null;
@@ -186,9 +188,35 @@ $("loginForm").onsubmit = async (e) => {
 };
 async function signOut() { await sb.auth.signOut(); show("loginView"); }
 
+// Read what the sign-in link brought back (tokens, a code, or an error) before anything else.
+async function handleAuthRedirect() {
+  const hash = new URLSearchParams(location.hash.slice(1));
+  const query = new URLSearchParams(location.search);
+  const err = hash.get("error_description") || query.get("error_description");
+  let msg = err ? decodeURIComponent(err.replace(/\+/g, " ")) : "";
+  try {
+    if (hash.get("access_token") && hash.get("refresh_token")) {
+      const { error } = await sb.auth.setSession({ access_token: hash.get("access_token"), refresh_token: hash.get("refresh_token") });
+      if (error) msg = error.message;
+    } else if (query.get("code")) {
+      const { error } = await sb.auth.exchangeCodeForSession(query.get("code"));
+      if (error) msg = error.message;
+    } else if (query.get("token_hash")) {
+      const { error } = await sb.auth.verifyOtp({ token_hash: query.get("token_hash"), type: query.get("type") || "email" });
+      if (error) msg = error.message;
+    }
+  } catch (e) { msg = e.message; }
+  if (location.hash || location.search) history.replaceState(null, "", location.pathname);
+  return msg;
+}
+
+let redirectMsg = "";
 async function boot() {
   const { data: { session } } = await sb.auth.getSession();
-  if (!session) return show("loginView");
+  if (!session) {
+    if (redirectMsg) $("loginMsg").textContent = "Sign-in link problem: " + redirectMsg + ". Request a new link and click it within a few minutes.";
+    return show("loginView");
+  }
   me = session.user.email;
   const { data: ok, error } = await sb.rpc("is_allowed");
   if (error || !ok) { $("deniedEmail").textContent = me; return show("deniedView"); }
@@ -196,7 +224,8 @@ async function boot() {
   show("appView");
   await loadPeople();
 }
-sb.auth.onAuthStateChange((ev) => { if (ev === "SIGNED_IN" || ev === "SIGNED_OUT") boot(); });
+let booted = false;
+sb.auth.onAuthStateChange((ev) => { if (booted && (ev === "SIGNED_IN" || ev === "SIGNED_OUT")) boot(); });
 
 // ---------- tabs
 document.querySelectorAll(".tabs button").forEach((b) => b.onclick = () => {
@@ -331,7 +360,7 @@ $("addForm").onsubmit = async (e) => {
   if (error) alert(error.message); else { $("newEmail").value = ""; loadEmails(); }
 };
 
-boot();
+handleAuthRedirect().then((m) => { redirectMsg = m; booted = true; return boot(); });
 </script>
 </body>
 </html>
