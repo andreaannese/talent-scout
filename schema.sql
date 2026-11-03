@@ -37,3 +37,9 @@ do $$ begin
     create policy signed_in_full_access on people for all to authenticated using (true) with check (true);
   end if;
 end $$;
+
+-- Make sure the API can use the tables, then refresh its cache of tables.
+grant usage on schema public to service_role, authenticated;
+grant all on table people, seen to service_role;
+grant select, insert, update, delete on table people to authenticated;
+notify pgrst, 'reload schema';

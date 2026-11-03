@@ -213,8 +213,12 @@ class SupabaseStore:
         req = urllib.request.Request(self.base + path, method=method,
               data=json.dumps(body).encode() if body is not None else None,
               headers={"Content-Type": "application/json", "User-Agent": UA, **self.h, **(extra or {})})
-        with urllib.request.urlopen(req, timeout=60) as r:
-            t = r.read().decode(); return json.loads(t) if t else None
+        try:
+            with urllib.request.urlopen(req, timeout=60) as r:
+                t = r.read().decode(); return json.loads(t) if t else None
+        except urllib.error.HTTPError as e:
+            raise SystemExit(f"Supabase {method} {path.split('?')[0]} failed: HTTP {e.code} {e.read().decode()[:500]}\n"
+                             f"Check that SUPABASE_URL looks like https://xxxx.supabase.co (no /rest/v1, no dashboard link).")
     def seen_keys(self):
         keys, off = set(), 0
         while True:  # memory = everything ever screened, kept or not
