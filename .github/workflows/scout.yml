@@ -1,0 +1,21 @@
+name: talent-scout
+on:
+  schedule: [{cron: "17 5 * * 1"}]   # every Monday
+  workflow_dispatch:
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    permissions: {contents: write}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: python scout.py
+        env:
+          LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          LLM_MODEL: ${{ secrets.LLM_MODEL }}
+      - run: |
+          git config user.name scout-bot && git config user.email scout-bot@users.noreply.github.com
+          git add scout.db people.csv && git commit -m "scout run $(date -u +%F)" || true
+          git push
