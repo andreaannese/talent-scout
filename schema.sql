@@ -84,3 +84,17 @@ begin new.updated_at = now(); return new; end $$;
 drop trigger if exists people_touch on people;
 create trigger people_touch before update on people for each row execute function public.touch_updated_at();
 notify pgrst, 'reload schema';
+
+-- v4: one row per scraper run, shown in the interface's Progress tab
+create table if not exists runs (
+  id bigint generated always as identity primary key,
+  started_at timestamptz, finished_at timestamptz,
+  discovered int, scored int, kept int, backlog int,
+  models text, stop_reason text
+);
+alter table runs enable row level security;
+grant all on table runs to service_role;
+grant select on table runs to authenticated;
+drop policy if exists allowed_read on runs;
+create policy allowed_read on runs for select to authenticated using (public.is_allowed());
+notify pgrst, 'reload schema';

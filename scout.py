@@ -161,11 +161,13 @@ def src_news(queries, per_query):
 # ---------------------------------------------------------------- Scoring (free LLM)
 LLM_PROMPT = """You screen candidates for a talent scouting list of people who did extraordinary
 things at a young age (tech/hacking preferred, also art, science, sport, business).
-Current year: {year}. From the text, return ONLY a JSON object:
-{{"name": str|null, "birth_year": int|null, "age_now": int|null, "achievement": str (one sentence),
-  "age_at_achievement": int|null, "category": "tech"|"science"|"art"|"business"|"sport"|"other",
-  "score": int 1-10 (10 = globally exceptional, 1 = ordinary/not a person/irrelevant)}}
-Text: {text}"""
+Current year: {year}. Below are {n} numbered candidate texts. Return ONLY a JSON array with one
+object per candidate, in the same order:
+[{{"i": int (the candidate number), "name": str|null, "birth_year": int|null, "age_now": int|null,
+  "achievement": str (one sentence), "age_at_achievement": int|null,
+  "category": "tech"|"science"|"art"|"business"|"sport"|"other",
+  "score": int 1-10 (10 = globally exceptional, 1 = ordinary/not about one person/irrelevant)}}]
+{texts}"""
 
 # Free models, best first. Each is used until its free quota runs out, then the next one.
 # Model names change often, so each provider is asked which models it offers right now and the
@@ -177,6 +179,8 @@ DEFAULT_CHAIN = [
      "prefer": [r"^gemini-[\d.]+-pro$", r"^gemini-[\d.]+-pro-latest$", r"^gemini-pro-latest$"], "model": "gemini-2.5-pro"},
     {"name": "gemini-flash", "base": "https://generativelanguage.googleapis.com/v1beta/openai", "key_env": "GEMINI_API_KEY",
      "prefer": [r"^gemini-[\d.]+-flash$", r"^gemini-flash-latest$", r"^gemini-[\d.]+-flash-lite$"], "model": "gemini-2.5-flash"},
+    {"name": "github-models","base": "https://models.github.ai/inference", "key_env": "GITHUB_TOKEN",
+     "prefer": [], "model": "openai/gpt-4.1-mini", "_resolved": True},
     {"name": "groq",         "base": "https://api.groq.com/openai/v1", "key_env": "GROQ_API_KEY",
      "prefer": [r"gpt-oss-120b", r"llama-4-maverick", r"kimi-k2", r"llama-3\.3-70b", r"qwen", r"llama"], "model": "llama-3.3-70b-versatile"},
     {"name": "cerebras",     "base": "https://api.cerebras.ai/v1", "key_env": "CEREBRAS_API_KEY",
@@ -227,33 +231,57 @@ def _is_quota_error(code, body):
     return code in (402, 403) or (code == 429 and any(w in b for w in
            ("quota", "daily", "per day", "exhausted", "limit exceeded", "credits", "rpd", "tokens per day")))
 
-def llm_score(item):
-    prompt = LLM_PROMPT.format(year=THIS_YEAR, text=item["text"][:2000])
+class AllQuotasUsed(Exception):
+    pass
+
+def _parse_array(out, n):
+    m = re.search(r"\[.*\]", out, re.S)
+    arr = json.loads(m.group(0)) if m else [json.loads(re.search(r"\{.*\}", out, re.S).group(0))]
+    res = [None] * n
+    for k, obj in enumerate(arr):
+        if not isinstance(obj, dict): continue
+        idx = obj.get("i")
+        idx = (int(idx) - 1) if isinstance(idx, (int, str)) and str(idx).isdigit() else k
+        if 0 <= idx < n: res[idx] = obj
+    return res
+
+def llm_score_batch(items):
+    """Score several candidates in one call. Returns (results, model_name)."""
+    texts = "\n".join(f"[{k+1}] {it['text'][:700]}" for k, it in enumerate(items))
+    prompt = LLM_PROMPT.format(year=THIS_YEAR, n=len(items), texts=texts)
     for p in CHAIN:
         if p["name"] in EXHAUSTED: continue
         payload = {"model": resolve_model(p), "temperature": 0, "messages": [{"role": "user", "content": prompt}]}
         headers = {"Authorization": f"Bearer {os.environ.get(p['key_env'], '')}"}
         for attempt in range(3):
             try:
-                r = post_json(p["base"].rstrip("/") + "/chat/completions", payload, headers)
-                out = r["choices"][0]["message"]["content"]
+                r = post_json(p["base"].rstrip("/") + "/chat/completions", payload, headers, timeout=120)
+                res = _parse_array(r["choices"][0]["message"]["content"], len(items))
+                if sum(x is not None for x in res) < len(items) // 2:
+                    raise ValueError("answer covered too few candidates")
                 USAGE[p["name"]] = USAGE.get(p["name"], 0) + 1
-                LAST_MODEL[0] = p["name"]
-                return json.loads(re.search(r"\{.*\}", out, re.S).group(0))
+                return res, p["name"]
             except urllib.error.HTTPError as e:
                 body = e.read().decode("utf-8", "replace") if hasattr(e, "read") else ""
                 if _is_quota_error(e.code, body):
                     print(f"  {p['name']}: free quota used up, switching to next model", file=sys.stderr)
                     EXHAUSTED.add(p["name"]); break
-                if e.code == 429 or e.code >= 500:  # per-minute limit or overloaded: wait, retry same model
-                    time.sleep(15 * (attempt + 1)); continue
+                if e.code == 429 or e.code >= 500:
+                    time.sleep(20 * (attempt + 1)); continue
                 print(f"  {p['name']} ({p['model']}): HTTP {e.code} {body[:200]}, trying next model", file=sys.stderr)
                 EXHAUSTED.add(p["name"]); break
-            except Exception as e:  # bad JSON from model: try next model for this item only
+            except Exception as e:
                 print(f"  {p['name']}: unusable answer ({e})", file=sys.stderr); break
-        else:
-            continue  # per-minute retries spent; move on for this item
-    return keyword_score(item)
+    if CHAIN and all(p["name"] in EXHAUSTED for p in CHAIN):
+        raise AllQuotasUsed()
+    if CHAIN:
+        return [None] * len(items), None   # temporary problem: leave these for the next run
+    return [keyword_score(it) for it in items], "keyword"
+
+# cheap pre-filter: skip candidates that clearly have nothing remarkable (saves AI quota)
+SIGNAL = re.compile(r"hack|prodig|youngest|olympiad|medal|award|prize|founder|founded|invent|patent|record|"
+                    r"champion|bounty|vulnerab|scholar|fellow|forbes|exhibit|album|debut|discover|startup|"
+                    r"\d{1,2}[- ]year[- ]old|teen|chess|grandmaster|composer|youngest|genius|million", re.I)
 
 KEYWORDS = {"hack": 3, "youngest": 3, "prodigy": 3, "olympiad": 3, "gold medal": 2, "founder": 2,
             "invent": 2, "award": 1, "record": 1, "bug bounty": 3, "vulnerab": 2, "scholarship": 1,
@@ -323,6 +351,9 @@ class SupabaseStore:
                            {"Prefer": "resolution=merge-duplicates"})
     def save(self, row):  # never overwrites status/notes you set in the UI
         self._req("POST", "people?on_conflict=key", [row], {"Prefer": "resolution=merge-duplicates"})
+    def log_run(self, row):
+        try: self._req("POST", "runs", [row])
+        except SystemExit as e: print(f"  could not log run: {e}", file=sys.stderr)
     def close(self): pass
 
 class SqliteStore:
@@ -334,6 +365,7 @@ class SqliteStore:
     def mark_seen(self, keys): self.con.executemany("INSERT OR REPLACE INTO seen VALUES (?,?)", keys)
     def save(self, row):
         self.con.execute(f"INSERT OR REPLACE INTO people VALUES ({','.join('?'*len(COLS))})", [row[c] for c in COLS])
+    def log_run(self, row): print("  run:", row)
     def close(self): self.con.commit(); export(self.con)
 
 def get_store():
@@ -360,41 +392,61 @@ def run(args):
     uniq = {}
     for it in items:
         if it["key"] not in seen: uniq.setdefault(it["key"], it)
-    items = list(uniq.values())[: args.max_new]
+    # newest-looking first: news, then Wikipedia/Wikidata
+    order = {"bing_news": 0, "google_news": 0, "gdelt": 0, "wikipedia": 1, "wikidata": 2}
+    items = sorted(uniq.values(), key=lambda it: order.get(it["source"], 3))[: args.max_new]
     print(f"{len(items)} new candidates to score (memory: {len(seen)} already screened)")
 
-    kept, batch = 0, []
-    for i, it in enumerate(items, 1):
-        before = sum(USAGE.values())
-        s = llm_score(it)
-        batch.append((it["key"], LAST_MODEL[0] if sum(USAGE.values()) > before else "keyword"))
-        name = s.get("name") or it.get("name")
-        by = it.get("birth_year") or s.get("birth_year")
-        age = (THIS_YEAR - by) if by else s.get("age_now")
-        try: score = int(s.get("score") or 0)
-        except (TypeError, ValueError): score = 0
-        if name and score >= args.min_score:
-            band = age_band(age)
-            email, ctype = None, None
-            if band in ("18-20", "adult"):
-                email, ctype = find_contact(it.get("website"))
-            elif band == "minor":
-                ctype = "minor: contact via guardian/school/organizer only"
-            store.save(dict(zip(COLS, (it["key"], name, by, age, band, s.get("achievement"),
-                s.get("age_at_achievement"), s.get("category"), score, it.get("country"), it.get("website"),
-                email, ctype, it["source"], it["source_url"],
-                dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")))))
-            kept += 1
-            KEPT.append((score, name, age, (s.get("achievement") or "")[:110]))
-        if i % 10 == 0:
-            store.mark_seen(batch); batch = []
-            print(f"  {i}/{len(items)} scored, {kept} kept")
+    before_filter = len(items)
+    items = [it for it in items if it["source"] != "wikipedia" or SIGNAL.search(it["text"])]
+    print(f"  pre-filter skipped {before_filter - len(items)} candidates with no achievement signal")
+
+    kept, seen_batch, scored, stop_reason = 0, [], 0, "finished"
+    started = dt.datetime.now(dt.timezone.utc)
+    deadline = time.time() + args.time_budget * 60
+    for start in range(0, len(items), args.batch):
+        if time.time() > deadline:
+            stop_reason = "time budget reached"; print("  Time budget reached: the rest waits for the next run"); break
+        chunk = items[start:start + args.batch]
+        try:
+            results, model = llm_score_batch(chunk)
+        except AllQuotasUsed:
+            stop_reason = "all free AI quotas used for today"
+            print("  All free AI quotas used: stopping, the rest waits for the next run"); break
+        for it, s in zip(chunk, results):
+            if s is None: continue
+            scored += 1
+            seen_batch.append((it["key"], model))
+            name = s.get("name") or it.get("name")
+            by = it.get("birth_year") or s.get("birth_year")
+            age = (THIS_YEAR - by) if by else s.get("age_now")
+            try: score = int(s.get("score") or 0)
+            except (TypeError, ValueError): score = 0
+            if name and score >= args.min_score:
+                band = age_band(age)
+                email, ctype = None, None
+                if band in ("18-20", "adult"):
+                    email, ctype = find_contact(it.get("website"))
+                elif band == "minor":
+                    ctype = "minor: contact via guardian/school/organizer only"
+                store.save(dict(zip(COLS, (it["key"], name, by, age, band, s.get("achievement"),
+                    s.get("age_at_achievement"), s.get("category"), score, it.get("country"), it.get("website"),
+                    email, ctype, it["source"], it["source_url"],
+                    dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")))))
+                kept += 1
+                KEPT.append((score, name, age, (s.get("achievement") or "")[:110]))
+        store.mark_seen(seen_batch); seen_batch = []
+        print(f"  {scored}/{len(items)} scored, {kept} kept")
         if CHAIN: time.sleep(args.llm_delay)
-    store.mark_seen(batch)
     store.close()
     for sc, nm, ag, ach in sorted(KEPT, key=lambda k: -k[0]):
         print(f"  [{sc}] {nm} (age {ag if ag is not None else '?'}): {ach}")
-    print(f"Done. {kept} people kept. LLM usage: {USAGE or 'none (keyword mode)'}.")
+    backlog = max(0, len(uniq) - scored)
+    print(f"Done. {scored} scored, {kept} kept, about {backlog} still waiting. AI calls: {USAGE or 'none'}.")
+    store.log_run({"started_at": started.isoformat(timespec="seconds"),
+                   "finished_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+                   "discovered": len(uniq), "scored": scored, "kept": kept, "backlog": backlog,
+                   "models": json.dumps(USAGE), "stop_reason": stop_reason})
 
 def export(con, path="people.csv"):
     cur = con.execute("SELECT * FROM people ORDER BY score DESC, age ASC")
@@ -410,6 +462,8 @@ if __name__ == "__main__":
     ap.add_argument("--limit", type=int, default=300, help="max Wikidata rows")
     ap.add_argument("--per-query", type=int, default=15, help="news items per query")
     ap.add_argument("--min-score", type=int, default=6)
-    ap.add_argument("--max-new", type=int, default=200, help="max new candidates per run (protects free quotas)")
-    ap.add_argument("--llm-delay", type=float, default=2.0, help="seconds between LLM calls (free-tier rate limits)")
+    ap.add_argument("--max-new", type=int, default=3000, help="max new candidates per run")
+    ap.add_argument("--batch", type=int, default=10, help="candidates per AI call")
+    ap.add_argument("--time-budget", type=float, default=60, help="minutes of AI scoring per run")
+    ap.add_argument("--llm-delay", type=float, default=4.0, help="seconds between LLM calls (free-tier rate limits)")
     run(ap.parse_args())

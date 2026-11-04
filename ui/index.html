@@ -79,6 +79,20 @@ header .sp { flex: 1; }
 .st-contacted { border-left: 3px solid var(--good); } .st-rejected { border-left: 3px solid var(--bad); opacity: .65; }
 .saved { font-size: 11px; color: var(--good); height: 14px; }
 .empty { padding: 40px; text-align: center; color: var(--muted); }
+/* progress */
+.prog { padding: 18px; margin-bottom: 12px; }
+.prog h3 { margin: 0 0 4px; font-size: 14px; }
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 12px; }
+.kpi { padding: 14px; } .kpi .n { font-size: 24px; font-weight: 700; } .kpi .l { color: var(--muted); font-size: 12px; }
+.bars { display: flex; align-items: flex-end; gap: 3px; height: 140px; margin-top: 14px; }
+.bar { flex: 1; background: var(--accent); border-radius: 3px 3px 0 0; min-height: 2px; position: relative; }
+.bar:hover { opacity: .8; }
+.bar span { position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%); font-size: 10px; color: var(--muted); }
+.axis { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); margin-top: 4px; }
+.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
+.tbl th, .tbl td { text-align: left; padding: 7px 6px; border-bottom: 1px solid var(--line); }
+.tbl th { color: var(--muted); font-weight: 500; }
+.tblwrap { overflow-x: auto; }
 /* access */
 .access { padding: 18px; max-width: 560px; }
 .access form { display: flex; gap: 8px; margin: 12px 0 16px; }
@@ -124,6 +138,7 @@ header .sp { flex: 1; }
       <h1>Talent Scout</h1>
       <div class="tabs">
         <button data-tab="people" class="on">People</button>
+        <button data-tab="progress">Progress</button>
         <button data-tab="access">Access</button>
       </div>
       <div class="sp"></div>
@@ -145,6 +160,20 @@ header .sp { flex: 1; }
         <button class="btn" onclick="exportCsv()">Export CSV</button>
       </div>
       <div class="list" id="list"></div>
+    </section>
+
+    <section id="tab-progress" class="hidden">
+      <div class="kpis" id="kpis"></div>
+      <div class="panel prog">
+        <h3>People added per day</h3>
+        <div class="muted" style="font-size:12px">Last 30 days, people with score 6 or more</div>
+        <div class="bars" id="bars"></div>
+        <div class="axis" id="axis"></div>
+      </div>
+      <div class="panel prog">
+        <h3>Recent runs</h3>
+        <div class="tblwrap"><table class="tbl" id="runs"></table></div>
+      </div>
     </section>
 
     <section id="tab-access" class="hidden">
@@ -232,7 +261,9 @@ document.querySelectorAll(".tabs button").forEach((b) => b.onclick = () => {
   document.querySelectorAll(".tabs button").forEach((x) => x.classList.toggle("on", x === b));
   $("tab-people").classList.toggle("hidden", b.dataset.tab !== "people");
   $("tab-access").classList.toggle("hidden", b.dataset.tab !== "access");
+  $("tab-progress").classList.toggle("hidden", b.dataset.tab !== "progress");
   if (b.dataset.tab === "access") loadEmails();
+  if (b.dataset.tab === "progress") loadProgress();
 });
 
 // ---------- people
@@ -339,6 +370,31 @@ function exportCsv() {
   a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
   a.download = `talent-scout-${new Date().toISOString().slice(0, 10)}.csv`;
   a.click();
+}
+
+// ---------- progress
+async function loadProgress() {
+  const { data: runs, error } = await sb.from("runs").select("*").order("started_at", { ascending: false }).limit(30);
+  // per-day counts from people already loaded
+  const days = [...Array(30)].map((_, k) => { const d = new Date(); d.setUTCDate(d.getUTCDate() - 29 + k); return d.toISOString().slice(0, 10); });
+  const perDay = Object.fromEntries(days.map((d) => [d, 0]));
+  people.forEach((p) => { const d = String(p.found_at || "").slice(0, 10); if (d in perDay) perDay[d]++; });
+  const max = Math.max(1, ...Object.values(perDay));
+  $("bars").innerHTML = days.map((d) => `<div class="bar" title="${d}: ${perDay[d]}" style="height:${(perDay[d] / max) * 100}%">${perDay[d] ? `<span>${perDay[d]}</span>` : ""}</div>`).join("");
+  $("axis").innerHTML = `<span>${days[0].slice(5)}</span><span>${days[29].slice(5)}</span>`;
+  const last = (runs || [])[0];
+  const week = days.slice(-7).reduce((a, d) => a + perDay[d], 0);
+  const kpi = (n, l) => `<div class="panel kpi"><div class="n">${n}</div><div class="l">${l}</div></div>`;
+  $("kpis").innerHTML = kpi(people.length, "people in total") + kpi(week, "added in the last 7 days") +
+    kpi(last ? last.kept : "?", "added in the last run") + kpi(last ? last.backlog : "?", "candidates still waiting");
+  if (error) { $("runs").innerHTML = `<tr><td>${esc(error.message)}</td></tr>`; return; }
+  if (!runs.length) { $("runs").innerHTML = '<tr><td class="muted">No runs logged yet. They appear after the next daily run.</td></tr>'; return; }
+  const fmt = (t) => t ? new Date(t).toLocaleString([], { dateStyle: "short", timeStyle: "short" }) : "";
+  $("runs").innerHTML = "<tr><th>Started</th><th>Found</th><th>Scored</th><th>Kept</th><th>Waiting</th><th>AI used</th><th>Ended because</th></tr>" +
+    runs.map((r) => {
+      let m = ""; try { m = Object.entries(JSON.parse(r.models || "{}")).map(([k, v]) => `${k} ${v}`).join(", "); } catch (e) {}
+      return `<tr><td>${fmt(r.started_at)}</td><td>${r.discovered ?? ""}</td><td>${r.scored ?? ""}</td><td><b>${r.kept ?? ""}</b></td><td>${r.backlog ?? ""}</td><td>${esc(m)}</td><td>${esc(r.stop_reason)}</td></tr>`;
+    }).join("");
 }
 
 // ---------- access list

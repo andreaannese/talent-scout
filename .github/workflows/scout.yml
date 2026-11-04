@@ -5,7 +5,10 @@ on:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 100
+    permissions:
+      contents: read
+      models: read          # free GitHub Models, no extra key needed
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
@@ -17,7 +20,7 @@ jobs:
       - name: Scrape and score
         # Wikidata (slow, 1 query/min) only on Mondays to stay well inside free GitHub minutes
         run: |
-          if [ "$(date -u +%u)" = "1" ]; then python scout.py; else python scout.py --sources news wikipedia; fi
+          if [ "$(date -u +%u)" = "1" ]; then python scout.py --max-new 1500; else python scout.py --sources news wikipedia --max-new 1500; fi
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
@@ -26,3 +29,4 @@ jobs:
           CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
