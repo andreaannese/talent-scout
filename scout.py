@@ -29,7 +29,11 @@ def post_json(url, payload, headers, timeout=60):
     req = urllib.request.Request(url, data=json.dumps(payload).encode(),
                                  headers={"Content-Type": "application/json", "User-Agent": UA, **headers})
     with urllib.request.urlopen(req, timeout=timeout) as r:
-        return json.loads(r.read())
+        raw = r.read()
+    try:
+        return json.loads(raw)
+    except ValueError:
+        raise ValueError(f"not JSON: {raw[:120]!r}")
 
 # ---------------------------------------------------------------- Storage
 def db():
@@ -176,11 +180,12 @@ object per candidate, in the same order:
 # A provider is skipped when its API key env var is missing. Override with LLM_CHAIN (JSON list).
 DEFAULT_CHAIN = [
     {"name": "gemini-pro",   "base": "https://generativelanguage.googleapis.com/v1beta/openai", "key_env": "GEMINI_API_KEY",
-     "prefer": [r"^gemini-[\d.]+-pro$", r"^gemini-[\d.]+-pro-latest$", r"^gemini-pro-latest$"], "model": "gemini-2.5-pro"},
+     "prefer": [r"^gemini-[\d.]+-pro$", r"^gemini-[\d.]+-pro-latest$", r"^gemini-pro-latest$", r"^gemini-[\d.]+-pro-preview$"], "model": "gemini-3.1-pro-preview"},
     {"name": "gemini-flash", "base": "https://generativelanguage.googleapis.com/v1beta/openai", "key_env": "GEMINI_API_KEY",
      "prefer": [r"^gemini-[\d.]+-flash$", r"^gemini-flash-latest$", r"^gemini-[\d.]+-flash-lite$"], "model": "gemini-2.5-flash"},
     {"name": "github-models","base": "https://models.github.ai/inference", "key_env": "GITHUB_TOKEN",
-     "prefer": [], "model": "openai/gpt-4.1-mini", "_resolved": True},
+     "prefer": [], "model": "openai/gpt-4.1-mini", "_resolved": True,
+     "headers": {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}},
     {"name": "groq",         "base": "https://api.groq.com/openai/v1", "key_env": "GROQ_API_KEY",
      "prefer": [r"gpt-oss-120b", r"llama-4-maverick", r"kimi-k2", r"llama-3\.3-70b", r"qwen", r"llama"], "model": "llama-3.3-70b-versatile"},
     {"name": "cloudflare",   "base": "https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/ai/v1", "key_env": "CF_AI_TOKEN",
@@ -205,7 +210,7 @@ def resolve_model(p):
               headers={"Authorization": f"Bearer {os.environ.get(p['key_env'], '')}", "User-Agent": UA})
         with urllib.request.urlopen(req, timeout=30) as r:
             ids = [m["id"].removeprefix("models/") for m in json.loads(r.read()).get("data", [])]
-        bad = re.compile(r"preview|exp|tts|audio|image|vision|embed|guard|whisper|search|live|thinking", re.I)
+        bad = re.compile(r"exp|tts|audio|image|vision|embed|guard|whisper|search|live|thinking", re.I)
         for pat in p.get("prefer", []):
             hits = [i for i in ids if re.search(pat, i) and not bad.search(i)]
             if hits:
@@ -229,6 +234,7 @@ EXHAUSTED = set()          # providers whose quota ran out during this run
 USAGE = {}                 # provider -> successful calls (printed at the end)
 LAST_MODEL = [None]        # model that scored the latest item
 KEPT = []                  # people kept this run, printed at the end
+FAILS = {}                 # provider -> unusable answers this run
 
 def _is_quota_error(code, body):
     b = body.lower()
@@ -256,10 +262,10 @@ def llm_score_batch(items):
     for p in CHAIN:
         if p["name"] in EXHAUSTED: continue
         payload = {"model": resolve_model(p), "temperature": 0, "messages": [{"role": "user", "content": prompt}]}
-        headers = {"Authorization": f"Bearer {os.environ.get(p['key_env'], '')}"}
+        headers = {"Authorization": f"Bearer {os.environ.get(p['key_env'], '')}", **p.get("headers", {})}
         for attempt in range(3):
             try:
-                r = post_json(p["base"].rstrip("/") + "/chat/completions", payload, headers, timeout=120)
+                r = post_json(p["base"].rstrip("/") + "/chat/completions", payload, headers, timeout=240)
                 res = _parse_array(r["choices"][0]["message"]["content"], len(items))
                 if sum(x is not None for x in res) < len(items) // 2:
                     raise ValueError("answer covered too few candidates")
@@ -275,7 +281,12 @@ def llm_score_batch(items):
                 print(f"  {p['name']} ({p['model']}): HTTP {e.code} {body[:200]}, trying next model", file=sys.stderr)
                 EXHAUSTED.add(p["name"]); break
             except Exception as e:
-                print(f"  {p['name']}: unusable answer ({e})", file=sys.stderr); break
+                FAILS[p["name"]] = FAILS.get(p["name"], 0) + 1
+                print(f"  {p['name']}: unusable answer ({str(e)[:150]})", file=sys.stderr)
+                if FAILS[p["name"]] >= 3:
+                    print(f"  {p['name']}: failed 3 times, skipping it for this run", file=sys.stderr)
+                    EXHAUSTED.add(p["name"])
+                break
     if CHAIN and all(p["name"] in EXHAUSTED for p in CHAIN):
         raise AllQuotasUsed()
     if CHAIN:
