@@ -54,10 +54,7 @@ create table if not exists allowed_emails (
   added_at timestamptz default now()
 );
 alter table allowed_emails enable row level security;
--- seed the owners once (only when the list is empty)
-insert into allowed_emails(email)
-  select e from (values ('owner@example.com'), ('owner2@example.com')) v(e)
-  where not exists (select 1 from allowed_emails);
+-- first authorised emails are added once by hand (Access tab or SQL editor), not stored in this file
 
 create or replace function public.is_allowed() returns boolean
 language sql stable security definer set search_path = public as $$

@@ -443,8 +443,8 @@ def run(args):
         print(f"  {scored}/{len(items)} scored, {kept} kept")
         if CHAIN: time.sleep(args.llm_delay)
     store.close()
-    for sc, nm, ag, ach in sorted(KEPT, key=lambda k: -k[0]):
-        print(f"  [{sc}] {nm} (age {ag if ag is not None else '?'}): {ach}")
+    # no names in logs: the repo's run logs may be public. See the interface for who was found.
+    if KEPT: print(f"  score spread of kept people: {sorted((k[0] for k in KEPT), reverse=True)}")
     backlog = max(0, len(uniq) - scored)
     print(f"Done. {scored} scored, {kept} kept, about {backlog} still waiting. AI calls: {USAGE or 'none'}.")
     store.log_run({"started_at": started.isoformat(timespec="seconds"),
