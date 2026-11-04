@@ -183,6 +183,8 @@ DEFAULT_CHAIN = [
      "prefer": [], "model": "openai/gpt-4.1-mini", "_resolved": True},
     {"name": "groq",         "base": "https://api.groq.com/openai/v1", "key_env": "GROQ_API_KEY",
      "prefer": [r"gpt-oss-120b", r"llama-4-maverick", r"kimi-k2", r"llama-3\.3-70b", r"qwen", r"llama"], "model": "llama-3.3-70b-versatile"},
+    {"name": "cloudflare",   "base": "https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/ai/v1", "key_env": "CF_AI_TOKEN",
+     "prefer": [], "model": "@cf/meta/llama-3.3-70b-instruct-fp8-fast", "_resolved": True},
     {"name": "cerebras",     "base": "https://api.cerebras.ai/v1", "key_env": "CEREBRAS_API_KEY",
      "prefer": [r"gpt-oss-120b", r"qwen-3-235b", r"llama-?4", r"llama"], "model": "llama-3.3-70b"},
     {"name": "openrouter",   "base": "https://openrouter.ai/api/v1", "key_env": "OPENROUTER_API_KEY",
@@ -218,7 +220,9 @@ def load_chain():
     if os.environ.get("LLM_BASE_URL"):  # single custom endpoint still supported
         chain = [{"name": "custom", "base": os.environ["LLM_BASE_URL"], "model": os.environ.get("LLM_MODEL"),
                   "key_env": "LLM_API_KEY", "_resolved": True}] + chain
-    return [p for p in chain if os.environ.get(p["key_env"]) or "localhost" in p["base"]]
+    for p in chain:  # fill account ids etc. from env, e.g. {CF_ACCOUNT_ID}
+        p["base"] = re.sub(r"\{(\w+)\}", lambda m: os.environ.get(m.group(1), ""), p["base"])
+    return [p for p in chain if (os.environ.get(p["key_env"]) and "accounts//" not in p["base"]) or "localhost" in p["base"]]
 
 CHAIN = load_chain()
 EXHAUSTED = set()          # providers whose quota ran out during this run
