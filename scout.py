@@ -202,6 +202,7 @@ def src_hn(per_query):
              "hitsPerPage": per_query})
         try: hits = json.loads(get(url))["hits"]
         except Exception as e: print(f"  hn '{q}' failed: {e}", file=sys.stderr); continue
+        print(f"  hn '{q}': {len(hits)}")
         for h in hits:
             text = re.sub("<[^>]+>", " ", unescape(h.get("story_text") or ""))[:500]
             link = h.get("url") or f"https://news.ycombinator.com/item?id={h['objectID']}"
@@ -236,12 +237,14 @@ per candidate, in the same order:
 # A provider is skipped when its API key env var is missing. Override with LLM_CHAIN (JSON list).
 DEFAULT_CHAIN = [
     {"name": "gemini-pro",   "base": "https://generativelanguage.googleapis.com/v1beta/openai", "key_env": "GEMINI_API_KEY",
-     "prefer": [r"^gemini-[\d.]+-pro$", r"^gemini-[\d.]+-pro-latest$", r"^gemini-pro-latest$", r"^gemini-[\d.]+-pro-preview$"], "model": "gemini-3.1-pro-preview"},
+     "prefer": [r"^gemini-[\d.]+-pro$", r"^gemini-[\d.]+-pro-latest$", r"^gemini-pro-latest$", r"^gemini-[\d.]+-pro-preview$"], "model": "gemini-3.1-pro-preview", "newest": True},
     {"name": "gemini-flash", "base": "https://generativelanguage.googleapis.com/v1beta/openai", "key_env": "GEMINI_API_KEY",
-     "prefer": [r"^gemini-[\d.]+-flash$", r"^gemini-flash-latest$", r"^gemini-[\d.]+-flash-lite$"], "model": "gemini-2.5-flash"},
+     "prefer": [r"^gemini-[\d.]+-flash$", r"^gemini-flash-latest$", r"^gemini-[\d.]+-flash-lite$"], "model": "gemini-2.5-flash", "newest": True},
     {"name": "github-models","base": "https://models.github.ai/inference", "key_env": "GITHUB_TOKEN",
      "prefer": [], "model": "openai/gpt-4.1-mini", "_resolved": True,
      "headers": {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}},
+    {"name": "github-models-legacy", "base": "https://models.inference.ai.azure.com", "key_env": "GITHUB_TOKEN",
+     "prefer": [], "model": "gpt-4o-mini", "_resolved": True},
     {"name": "groq",         "base": "https://api.groq.com/openai/v1", "key_env": "GROQ_API_KEY",
      "prefer": [r"gpt-oss-120b", r"llama-4-maverick", r"kimi-k2", r"llama-3\.3-70b", r"qwen", r"llama"], "model": "llama-3.3-70b-versatile"},
     {"name": "cloudflare",   "base": "https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/ai/v1", "key_env": "CF_AI_TOKEN",
@@ -267,10 +270,14 @@ def resolve_model(p):
         with urllib.request.urlopen(req, timeout=30) as r:
             ids = [m["id"].removeprefix("models/") for m in json.loads(r.read()).get("data", [])]
         bad = re.compile(r"exp|tts|audio|image|vision|embed|guard|whisper|search|live|thinking", re.I)
-        for pat in p.get("prefer", []):
-            hits = [i for i in ids if re.search(pat, i) and not bad.search(i)]
-            if hits:
-                p["model"] = max(hits, key=_version_key); break
+        if p.get("newest"):   # newest version across all patterns (e.g. 3.1-pro-preview beats 2.5-pro)
+            hits = [i for i in ids if not bad.search(i) and any(re.search(pt, i) for pt in p.get("prefer", []))]
+            if hits: p["model"] = max(hits, key=_version_key)
+        else:
+            for pat in p.get("prefer", []):
+                hits = [i for i in ids if re.search(pat, i) and not bad.search(i)]
+                if hits:
+                    p["model"] = max(hits, key=_version_key); break
     except Exception as e:
         print(f"  {p['name']}: could not list models ({e}), using {p['model']}", file=sys.stderr)
     print(f"  {p['name']}: using model {p['model']}")
