@@ -20,7 +20,7 @@ jobs:
       - name: Scrape and score
         # Wikidata (slow, 1 query/min) only on Mondays to stay well inside free GitHub minutes
         run: |
-          if [ "$(date -u +%u)" = "1" ]; then python scout.py --max-new 1500; else python scout.py --sources news wikipedia --max-new 1500; fi
+          if [ "$(date -u +%u)" = "1" ]; then python scout.py --max-new 1500; else python scout.py --sources illegible hn news wikipedia --max-new 1500; fi
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}

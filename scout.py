@@ -18,6 +18,7 @@ from html import unescape
 UA = "TalentScout/0.3 (+https://github.com/andreaannese/talent-scout) python-urllib"
 DB = os.environ.get("SCOUT_DB", "scout.db")
 THIS_YEAR = dt.date.today().year
+MIN_AGE, MAX_AGE = 16, 20   # target: people this old TODAY (overridable with --min-age/--max-age)
 
 # ---------------------------------------------------------------- HTTP utils
 def get(url, timeout=30, headers=None):
@@ -124,9 +125,12 @@ def src_wikipedia(min_age, max_age, per_query):
 
 # ---------------------------------------------------------------- Source 2: News RSS
 NEWS_QUERIES = [
-    '"year-old hacker"', '"teen hacker"', '"year-old inventor"', '"teen founder"',
-    '"youngest ever" prodigy', '"year-old" startup founder', '"child prodigy" artist',
-    '"year-old" scientist award', '"teen" "olympiad" gold', '"year-old" bug bounty',
+    '"17-year-old founder"', '"18-year-old founder"', '"19-year-old founder"', '"16-year-old founder"',
+    '"teen founder" raises', '"high school" founder startup raises', '"Thiel Fellow"', '"Thiel Fellowship" 2026',
+    '"Emergent Ventures" winners', '"Z Fellows"', '"Rise" fellowship global winners', '"teen hacker"',
+    '"year-old" security researcher vulnerability', '"teenager" built app users', '"youngest" Y Combinator founder',
+    '"dropped out" 19-year-old startup', '"teen" "olympiad" gold medal', '"Regeneron" science talent search winner',
+    '"year-old" developer AI startup',
 ]
 
 def _rss_items(xml_text, per_query, source):
@@ -162,15 +166,67 @@ def src_news(queries, per_query):
                 print(f"  news {name} '{q}': {len(got)}"); yield from got; break
         time.sleep(6)  # GDELT asks for max ~1 request / 5 s
 
+# ---------------------------------------------------------------- Source 3: Illegible (YouTube)
+ILLEGIBLE_HANDLE = "IllegibleWorld"
+
+def src_illegible():
+    """Latest episodes of the Illegible channel: each guest is a strong candidate."""
+    try:
+        page = get(f"https://www.youtube.com/@{ILLEGIBLE_HANDLE}", timeout=30,
+                   headers={"Accept-Language": "en", "Cookie": "CONSENT=YES+1"})
+        cid = re.search(r'"(?:channelId|externalId)":"(UC[\w-]{22})"', page).group(1)
+        root = ET.fromstring(get(f"https://www.youtube.com/feeds/videos.xml?channel_id={cid}"))
+    except Exception as e:
+        print(f"  illegible failed: {e}", file=sys.stderr); return
+    ns = {"a": "http://www.w3.org/2005/Atom", "m": "http://search.yahoo.com/mrss/"}
+    n = 0
+    for e in root.findall("a:entry", ns):
+        title = e.findtext("a:title", "", ns)
+        desc = e.findtext("m:group/m:description", "", ns)[:600]
+        link = e.find("a:link", ns).get("href")
+        n += 1
+        yield {"key": "yt:" + link, "name": None, "birth_year": None,
+               "text": f"Illegible podcast episode ({e.findtext('a:published', '', ns)[:10]}): {title}. {desc}",
+               "website": None, "country": None, "source": "illegible", "source_url": link}
+    print(f"  illegible: {n} episodes")
+
+# ---------------------------------------------------------------- Source 4: Hacker News
+HN_QUERIES = ["I'm 16", "I'm 17", "I'm 18", "I'm 19", "high schooler", "16 year old", "17 year old",
+              "18 year old", "19 year old", "teenager built", "Thiel Fellow"]
+
+def src_hn(per_query):
+    since = int(time.time()) - 365 * 86400
+    for q in HN_QUERIES:
+        url = "https://hn.algolia.com/api/v1/search?" + urllib.parse.urlencode(
+            {"query": f'"{q}"', "tags": "(story,show_hn)", "numericFilters": f"created_at_i>{since},points>20",
+             "hitsPerPage": per_query})
+        try: hits = json.loads(get(url))["hits"]
+        except Exception as e: print(f"  hn '{q}' failed: {e}", file=sys.stderr); continue
+        for h in hits:
+            text = re.sub("<[^>]+>", " ", unescape(h.get("story_text") or ""))[:500]
+            link = h.get("url") or f"https://news.ycombinator.com/item?id={h['objectID']}"
+            yield {"key": "hn:" + h["objectID"], "name": None, "birth_year": None,
+                   "text": f"Hacker News post by {h.get('author')} ({h.get('created_at','')[:10]}, {h.get('points')} points): "
+                           f"{h.get('title')}. {text}",
+                   "website": h.get("url"), "country": None, "source": "hacker_news",
+                   "source_url": f"https://news.ycombinator.com/item?id={h['objectID']}"}
+        time.sleep(1)
+
 # ---------------------------------------------------------------- Scoring (free LLM)
-LLM_PROMPT = """You screen candidates for a talent scouting list of people who did extraordinary
-things at a young age (tech/hacking preferred, also art, science, sport, business).
-Current year: {year}. Below are {n} numbered candidate texts. Return ONLY a JSON array with one
-object per candidate, in the same order:
-[{{"i": int (the candidate number), "name": str|null, "birth_year": int|null, "age_now": int|null,
-  "achievement": str (one sentence), "age_at_achievement": int|null,
-  "category": "tech"|"science"|"art"|"business"|"sport"|"other",
-  "score": int 1-10 (10 = globally exceptional, 1 = ordinary/not about one person/irrelevant)}}]
+LLM_PROMPT = """You screen candidates for a scouting list of exceptional YOUNG builders: people who are
+16 to 20 years old TODAY (born {min_birth} to {max_birth}) and have already done something remarkable,
+the kind of guest the "Illegible" podcast interviews: teen founders who raised money or got real users,
+young researchers, hackers and security researchers, Thiel / Emergent Ventures / Z Fellows / Rise fellows,
+olympiad medalists who now build things, young engineers shipping ambitious projects.
+Tech and science are preferred; exceptional young artists or athletes score lower unless globally known.
+Current year: {year}. Below are {n} numbered candidate texts. Return ONLY a JSON array with one object
+per candidate, in the same order:
+[{{"i": int (the candidate number), "name": str|null (one specific person, else null),
+  "birth_year": int|null, "age_now": int|null (best estimate of age TODAY, from the text and dates),
+  "achievement": str (one concrete sentence: what they did, numbers if any),
+  "age_at_achievement": int|null, "category": "tech"|"science"|"art"|"business"|"sport"|"other",
+  "score": int 1-10 (10 = would be a perfect Illegible guest; score 1 if older than 20 today,
+           not about one specific person, or nothing remarkable)}}]
 {texts}"""
 
 # Free models, best first. Each is used until its free quota runs out, then the next one.
@@ -258,7 +314,8 @@ def _parse_array(out, n):
 def llm_score_batch(items):
     """Score several candidates in one call. Returns (results, model_name)."""
     texts = "\n".join(f"[{k+1}] {it['text'][:700]}" for k, it in enumerate(items))
-    prompt = LLM_PROMPT.format(year=THIS_YEAR, n=len(items), texts=texts)
+    prompt = LLM_PROMPT.format(year=THIS_YEAR, n=len(items), texts=texts,
+                               min_birth=THIS_YEAR - MAX_AGE, max_birth=THIS_YEAR - MIN_AGE)
     for p in CHAIN:
         if p["name"] in EXHAUSTED: continue
         payload = {"model": resolve_model(p), "temperature": 0, "messages": [{"role": "user", "content": prompt}]}
@@ -401,6 +458,12 @@ def run(args):
     if "wikipedia" in args.sources:
         print("Searching Wikipedia...")
         items += list(src_wikipedia(args.min_age, args.max_age, args.wiki_per_query))
+    if "illegible" in args.sources:
+        print("Reading Illegible episodes...")
+        items += list(src_illegible())
+    if "hn" in args.sources:
+        print("Searching Hacker News...")
+        items += list(src_hn(args.per_query))
     if "news" in args.sources:
         print("Reading news RSS...")
         items += list(src_news(NEWS_QUERIES, args.per_query))
@@ -408,7 +471,7 @@ def run(args):
     for it in items:
         if it["key"] not in seen: uniq.setdefault(it["key"], it)
     # newest-looking first: news, then Wikipedia/Wikidata
-    order = {"bing_news": 0, "google_news": 0, "gdelt": 0, "wikipedia": 1, "wikidata": 2}
+    order = {"illegible": 0, "hacker_news": 1, "bing_news": 1, "google_news": 1, "gdelt": 1, "wikipedia": 2, "wikidata": 3}
     items = sorted(uniq.values(), key=lambda it: order.get(it["source"], 3))[: args.max_new]
     print(f"{len(items)} new candidates to score (memory: {len(seen)} already screened)")
 
@@ -437,6 +500,8 @@ def run(args):
             age = (THIS_YEAR - by) if by else s.get("age_now")
             try: score = int(s.get("score") or 0)
             except (TypeError, ValueError): score = 0
+            if age is not None and not (args.min_age <= age <= args.max_age):
+                continue   # outside the target age range today
             if name and score >= args.min_score:
                 band = age_band(age)
                 email, ctype = None, None
@@ -470,10 +535,10 @@ def export(con, path="people.csv"):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--sources", nargs="+", default=["news", "wikipedia", "wikidata"])
+    ap.add_argument("--sources", nargs="+", default=["illegible", "hn", "news", "wikipedia", "wikidata"])
     ap.add_argument("--wiki-per-query", type=int, default=5)
-    ap.add_argument("--min-age", type=int, default=14)
-    ap.add_argument("--max-age", type=int, default=35, help="35 keeps 'older but did it young' people")
+    ap.add_argument("--min-age", type=int, default=16)
+    ap.add_argument("--max-age", type=int, default=20, help="age TODAY")
     ap.add_argument("--limit", type=int, default=300, help="max Wikidata rows")
     ap.add_argument("--per-query", type=int, default=15, help="news items per query")
     ap.add_argument("--min-score", type=int, default=6)
@@ -481,4 +546,6 @@ if __name__ == "__main__":
     ap.add_argument("--batch", type=int, default=10, help="candidates per AI call")
     ap.add_argument("--time-budget", type=float, default=60, help="minutes of AI scoring per run")
     ap.add_argument("--llm-delay", type=float, default=4.0, help="seconds between LLM calls (free-tier rate limits)")
-    run(ap.parse_args())
+    a = ap.parse_args()
+    MIN_AGE, MAX_AGE = a.min_age, a.max_age
+    run(a)

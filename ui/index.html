@@ -152,7 +152,7 @@ header .sp { flex: 1; }
         <input type="search" id="q" placeholder="Search name, achievement, notes">
         <select id="fCat"><option value="">All categories</option>
           <option>tech</option><option>science</option><option>art</option><option>business</option><option>sport</option><option>other</option></select>
-        <select id="fBand"><option value="">All ages</option>
+        <select id="fBand"><option value="target" selected>Age 16 to 20 now</option><option value="">All ages</option>
           <option value="minor">Under 18</option><option value="18-20">18 to 20</option><option value="adult">21+</option><option value="unknown">Unknown</option></select>
         <select id="fScore"><option value="0">Any score</option><option value="7">7+</option><option value="8">8+</option><option value="9">9+</option></select>
         <select id="fContact"><option value="">Any contact</option><option value="email">Has email</option><option value="none">No email</option></select>
@@ -286,7 +286,7 @@ function filtered() {
         min = +$("fScore").value, contact = $("fContact").value, sort = $("sort").value;
   let r = people.filter((p) =>
     (!statusFilter || p.status === statusFilter) &&
-    (!cat || p.category === cat) && (!band || p.age_band === band) && (p.score || 0) >= min &&
+    (!cat || p.category === cat) && (!band || (band === "target" ? (p.age != null && p.age >= 16 && p.age <= 20) : p.age_band === band)) && (p.score || 0) >= min &&
     (!contact || (contact === "email" ? !!p.contact_email : !p.contact_email)) &&
     (!q || [p.name, p.achievement, p.notes, p.country].join(" ").toLowerCase().includes(q)));
   const by = {
